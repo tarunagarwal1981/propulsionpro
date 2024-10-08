@@ -7,6 +7,11 @@ from minio.error import S3Error
 from PIL import Image
 import openai
 import re
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import pytesseract
+from io import BytesIO
 
 # Function to get OpenAI API key
 def get_api_key():
@@ -30,6 +35,9 @@ minio_client = Minio(
 
 BUCKET_NAME = st.secrets["R2_BUCKET_NAME"]
 
+# Initialize SentenceTransformer model
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
 def get_pdf_from_r2(file_name):
     try:
         response = minio_client.get_object(BUCKET_NAME, file_name)
@@ -38,67 +46,82 @@ def get_pdf_from_r2(file_name):
         st.error(f"Error downloading file from R2: {exc}")
         return None
 
-def extract_content(pdf_content):
+def extract_content_with_metadata(pdf_content):
     text_content = []
     images = []
     doc = fitz.open(stream=pdf_content, filetype="pdf")
-    for page in doc:
-        text_content.append(page.get_text())
-        for img in page.get_images():
+    for page_num, page in enumerate(doc):
+        text = page.get_text()
+        text_content.append({
+            'page': page_num + 1,
+            'content': text
+        })
+        for img_index, img in enumerate(page.get_images()):
             xref = img[0]
             base_image = doc.extract_image(xref)
             image_bytes = base_image["image"]
             image = Image.open(io.BytesIO(image_bytes))
-            images.append(image)
-    return ' '.join(text_content), images
+            
+            # Extract text near the image
+            nearby_text = page.get_text("text", clip=page.rect.inflate(-50, -50))
+            
+            # Use OCR to extract text from the image
+            image_text = pytesseract.image_to_string(image)
+            
+            images.append({
+                'page': page_num + 1,
+                'index': img_index,
+                'image': image,
+                'nearby_text': nearby_text,
+                'image_text': image_text
+            })
+    return text_content, images
 
-def chunk_text(text, chunk_size=2000):
-    # Simple sentence splitting
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+def chunk_text_with_metadata(text_content, chunk_size=500):
     chunks = []
-    current_chunk = []
-    current_size = 0
-    for sentence in sentences:
-        if current_size + len(sentence) <= chunk_size:
-            current_chunk.append(sentence)
-            current_size += len(sentence)
-        else:
-            chunks.append(' '.join(current_chunk))
-            current_chunk = [sentence]
-            current_size = len(sentence)
-    if current_chunk:
-        chunks.append(' '.join(current_chunk))
+    for page_data in text_content:
+        page_num = page_data['page']
+        text = page_data['content']
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        current_chunk = []
+        current_size = 0
+        for sentence in sentences:
+            if current_size + len(sentence) <= chunk_size:
+                current_chunk.append(sentence)
+                current_size += len(sentence)
+            else:
+                chunks.append({
+                    'page': page_num,
+                    'content': ' '.join(current_chunk)
+                })
+                current_chunk = [sentence]
+                current_size = len(sentence)
+        if current_chunk:
+            chunks.append({
+                'page': page_num,
+                'content': ' '.join(current_chunk)
+            })
     return chunks
 
-def find_most_relevant_chunk(query, chunks):
-    prompt = f"Query: {query}\n\nRate the relevance of each text chunk to the query on a scale of 0-10. Respond with only the number.\n\n"
-    chunk_scores = []
-    for i, chunk in enumerate(chunks):
-        chunk_prompt = prompt + f"Text chunk {i+1}: {chunk[:500]}..."  # Limit chunk size
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are an AI assistant that rates text relevance."},
-                {"role": "user", "content": chunk_prompt}
-            ],
-            max_tokens=1,
-            temperature=0
-        )
-        try:
-            score = int(response.choices[0].message['content'])
-        except ValueError:
-            score = 0  # Default to 0 if we can't parse the response
-        chunk_scores.append((i, score))
-    
-    most_relevant_chunk = max(chunk_scores, key=lambda x: x[1])
-    return chunks[most_relevant_chunk[0]]
+def vectorize_chunks(chunks):
+    return [model.encode(chunk['content']) for chunk in chunks]
 
-def answer_query(query, context):
+def find_most_relevant_chunk(query, chunks, chunk_vectors):
+    query_vector = model.encode(query)
+    similarities = cosine_similarity([query_vector], chunk_vectors)[0]
+    most_relevant_index = np.argmax(similarities)
+    return chunks[most_relevant_index], similarities[most_relevant_index]
+
+def answer_query(query, context, images):
+    # Prepare image descriptions
+    image_descriptions = [f"Image on page {img['page']}: {img['image_text']}" for img in images if img['page'] == context['page']]
+    image_context = "\n".join(image_descriptions)
+
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=[
             {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures."},
-            {"role": "user", "content": f"Context: {context}\n\nQuestion: {query}"}
+            {"role": "user", "content": f"Context: {context['content']}\n\nImage Context: {image_context}\n\nQuestion: {query}"}
         ]
     )
     return response.choices[0].message['content']
@@ -119,25 +142,30 @@ if selected_file:
     pdf_content = get_pdf_from_r2(selected_file)
     if pdf_content:
         st.success(f'Manual "{selected_file}" successfully loaded from R2!')
-        text_content, images = extract_content(pdf_content)
-        chunks = chunk_text(text_content)
+        text_content, images = extract_content_with_metadata(pdf_content)
+        chunks = chunk_text_with_metadata(text_content)
+        chunk_vectors = vectorize_chunks(chunks)
 
         query = st.text_input('Enter your maintenance query:')
         if query:
             with st.spinner('Processing your query...'):
-                relevant_chunk = find_most_relevant_chunk(query, chunks)
-                response = answer_query(query, relevant_chunk)
+                relevant_chunk, similarity_score = find_most_relevant_chunk(query, chunks, chunk_vectors)
+                response = answer_query(query, relevant_chunk, images)
             st.subheader('Answer:')
             st.write(response)
+            st.write(f"Confidence: {similarity_score:.2f}")
 
             st.subheader('Related Images:')
-            for i, img in enumerate(images):
-                st.image(img, caption=f'Image {i+1}', use_column_width=True)
+            relevant_images = [img for img in images if img['page'] == relevant_chunk['page']]
+            for img in relevant_images:
+                st.image(img['image'], caption=f"Image on page {img['page']}", use_column_width=True)
+                st.write(f"Nearby text: {img['nearby_text'][:200]}...")
+                st.write(f"Image text: {img['image_text']}")
 
 st.sidebar.markdown("""
 ## How to use PropulsionPro:
 1. Select a PDF manual from the dropdown.
 2. Wait for the manual to load and process.
 3. Enter your maintenance query in the search box.
-4. View the answer and related images below.
+4. View the answer, confidence score, and related images below.
 """)
