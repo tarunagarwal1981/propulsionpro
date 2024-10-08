@@ -6,11 +6,6 @@ from minio import Minio
 from minio.error import S3Error
 from PIL import Image
 import openai
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.chains.question_answering import load_qa_chain
-from langchain.llms import OpenAI
 
 # Function to get OpenAI API key
 def get_api_key():
@@ -56,30 +51,15 @@ def extract_content(pdf_content):
             images.append(image)
     return ' '.join(text_content), images
 
-def process_pdf(pdf_content):
-    text_content, images = extract_content(pdf_content)
-    
-    # Create text chunks
-    text_splitter = CharacterTextSplitter(
-        separator="\n",
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
+def answer_query(query, context):
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures."},
+            {"role": "user", "content": f"Context: {context}\n\nQuestion: {query}"}
+        ]
     )
-    chunks = text_splitter.split_text(text_content)
-
-    # Create embeddings
-    embeddings = OpenAIEmbeddings()
-    knowledge_base = FAISS.from_texts(chunks, embeddings)
-
-    return knowledge_base, images
-
-def answer_query(query, knowledge_base):
-    docs = knowledge_base.similarity_search(query)
-    llm = OpenAI()
-    chain = load_qa_chain(llm, chain_type="stuff")
-    response = chain.run(input_documents=docs, question=query)
-    return response
+    return response.choices[0].message['content']
 
 # Streamlit UI
 st.title('PropulsionPro: Marine Engine Manual Query System')
@@ -97,11 +77,11 @@ if selected_file:
     pdf_content = get_pdf_from_r2(selected_file)
     if pdf_content:
         st.success(f'Manual "{selected_file}" successfully loaded from R2!')
-        knowledge_base, images = process_pdf(pdf_content)
+        text_content, images = extract_content(pdf_content)
 
         query = st.text_input('Enter your maintenance query:')
         if query:
-            response = answer_query(query, knowledge_base)
+            response = answer_query(query, text_content)
             st.subheader('Answer:')
             st.write(response)
 
