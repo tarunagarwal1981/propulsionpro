@@ -6,6 +6,11 @@ from minio import Minio
 from minio.error import S3Error
 from PIL import Image
 import openai
+import nltk
+from nltk.tokenize import sent_tokenize
+
+# Download necessary NLTK data
+nltk.download('punkt', quiet=True)
 
 # Function to get OpenAI API key
 def get_api_key():
@@ -51,6 +56,41 @@ def extract_content(pdf_content):
             images.append(image)
     return ' '.join(text_content), images
 
+def chunk_text(text, chunk_size=2000):
+    sentences = sent_tokenize(text)
+    chunks = []
+    current_chunk = []
+    current_size = 0
+    for sentence in sentences:
+        if current_size + len(sentence) <= chunk_size:
+            current_chunk.append(sentence)
+            current_size += len(sentence)
+        else:
+            chunks.append(' '.join(current_chunk))
+            current_chunk = [sentence]
+            current_size = len(sentence)
+    if current_chunk:
+        chunks.append(' '.join(current_chunk))
+    return chunks
+
+def find_most_relevant_chunk(query, chunks):
+    chunk_scores = []
+    for i, chunk in enumerate(chunks):
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Rate the relevance of this text to the query on a scale of 0-10."},
+                {"role": "user", "content": f"Query: {query}\n\nText: {chunk}"}
+            ],
+            max_tokens=1,
+            temperature=0
+        )
+        score = int(response.choices[0].message['content'])
+        chunk_scores.append((i, score))
+    
+    most_relevant_chunk = max(chunk_scores, key=lambda x: x[1])
+    return chunks[most_relevant_chunk[0]]
+
 def answer_query(query, context):
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
@@ -78,10 +118,12 @@ if selected_file:
     if pdf_content:
         st.success(f'Manual "{selected_file}" successfully loaded from R2!')
         text_content, images = extract_content(pdf_content)
+        chunks = chunk_text(text_content)
 
         query = st.text_input('Enter your maintenance query:')
         if query:
-            response = answer_query(query, text_content)
+            relevant_chunk = find_most_relevant_chunk(query, chunks)
+            response = answer_query(query, relevant_chunk)
             st.subheader('Answer:')
             st.write(response)
 
