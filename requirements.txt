@@ -7,3 +7,6 @@ scikit-learn
 pillow
 minio 
 python-dotenv
+PyMuPDF
+openai == 0.28
+langchain
