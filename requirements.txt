@@ -10,3 +10,5 @@ python-dotenv
 PyMuPDF
 openai == 0.28
 langchain
+sentence-transformers 
+pytesseract
