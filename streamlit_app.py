@@ -6,11 +6,7 @@ from minio import Minio
 from minio.error import S3Error
 from PIL import Image
 import openai
-import nltk
-from nltk.tokenize import sent_tokenize
-
-# Download necessary NLTK data
-nltk.download('punkt', quiet=True)
+import re
 
 # Function to get OpenAI API key
 def get_api_key():
@@ -57,7 +53,8 @@ def extract_content(pdf_content):
     return ' '.join(text_content), images
 
 def chunk_text(text, chunk_size=2000):
-    sentences = sent_tokenize(text)
+    # Simple sentence splitting
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     current_chunk = []
     current_size = 0
