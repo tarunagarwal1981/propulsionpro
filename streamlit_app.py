@@ -71,18 +71,23 @@ def chunk_text(text, chunk_size=2000):
     return chunks
 
 def find_most_relevant_chunk(query, chunks):
+    prompt = f"Query: {query}\n\nRate the relevance of each text chunk to the query on a scale of 0-10. Respond with only the number.\n\n"
     chunk_scores = []
     for i, chunk in enumerate(chunks):
+        chunk_prompt = prompt + f"Text chunk {i+1}: {chunk[:500]}..."  # Limit chunk size
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "Rate the relevance of this text to the query on a scale of 0-10."},
-                {"role": "user", "content": f"Query: {query}\n\nText: {chunk}"}
+                {"role": "system", "content": "You are an AI assistant that rates text relevance."},
+                {"role": "user", "content": chunk_prompt}
             ],
             max_tokens=1,
             temperature=0
         )
-        score = int(response.choices[0].message['content'])
+        try:
+            score = int(response.choices[0].message['content'])
+        except ValueError:
+            score = 0  # Default to 0 if we can't parse the response
         chunk_scores.append((i, score))
     
     most_relevant_chunk = max(chunk_scores, key=lambda x: x[1])
@@ -119,8 +124,9 @@ if selected_file:
 
         query = st.text_input('Enter your maintenance query:')
         if query:
-            relevant_chunk = find_most_relevant_chunk(query, chunks)
-            response = answer_query(query, relevant_chunk)
+            with st.spinner('Processing your query...'):
+                relevant_chunk = find_most_relevant_chunk(query, chunks)
+                response = answer_query(query, relevant_chunk)
             st.subheader('Answer:')
             st.write(response)
 
