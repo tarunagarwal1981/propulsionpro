@@ -1,23 +1,18 @@
 import streamlit as st
 import PyPDF2
 import io
-import os
 from minio import Minio
 from minio.error import S3Error
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
 
 # Initialize MinIO client (for R2)
 minio_client = Minio(
-    os.getenv("R2_ENDPOINT").replace("https://", ""),
-    access_key=os.getenv("R2_ACCESS_KEY"),
-    secret_key=os.getenv("R2_SECRET_KEY"),
+    st.secrets["R2_ENDPOINT"].replace("https://", ""),
+    access_key=st.secrets["R2_ACCESS_KEY"],
+    secret_key=st.secrets["R2_SECRET_KEY"],
     secure=True
 )
 
-BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
+BUCKET_NAME = st.secrets["R2_BUCKET_NAME"]
 
 def get_pdf_from_r2(file_name):
     try:
