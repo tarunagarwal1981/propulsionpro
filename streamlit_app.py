@@ -29,7 +29,7 @@ except ValueError as e:
     st.error(str(e))
 
 # Lazy load SentenceTransformer model
-@st.cache(allow_output_mutation=True)
+@st.cache_resource
 def load_model():
     try:
         return SentenceTransformer('all-MiniLM-L6-v2')
