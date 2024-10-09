@@ -12,6 +12,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import pytesseract
 from io import BytesIO
+import time
 
 # Function to get OpenAI API key
 def get_api_key():
@@ -28,7 +29,7 @@ try:
 except ValueError as e:
     st.error(str(e))
 
-# Lazy load SentenceTransformer model
+# Lazy load SentenceTransformer model (initialize only when required)
 @st.cache_resource
 def load_model():
     try:
@@ -37,7 +38,7 @@ def load_model():
         st.error(f"Failed to load model: {e}")
         return None
 
-model = load_model()
+model = None
 
 # Initialize MinIO client (for R2)
 def initialize_minio():
@@ -146,6 +147,11 @@ def chunk_text_with_metadata(text_content, chunk_size=500):
 
 # Vectorize chunks
 def vectorize_chunks(chunks):
+    global model
+    if model is None:
+        with st.spinner('Loading model, please wait...'):
+            model = load_model()
+            time.sleep(2)  # Give some time for health checks to pass
     if model is not None:
         return [model.encode(chunk['content']) for chunk in chunks]
     return []
