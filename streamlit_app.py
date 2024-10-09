@@ -56,25 +56,32 @@ def extract_content_with_metadata(pdf_content):
             'page': page_num + 1,
             'content': text
         })
-        for img_index, img in enumerate(page.get_images()):
+        
+        # Get all images on the page
+        image_list = page.get_images(full=True)
+        for img_index, img in enumerate(image_list):
             xref = img[0]
             base_image = doc.extract_image(xref)
             image_bytes = base_image["image"]
             image = Image.open(io.BytesIO(image_bytes))
             
-            # Extract text near the image (adjusted to avoid using rect.inflate)
+            # Get image rectangle (bbox) directly from the image info
+            bbox = img[1]
+            
+            # Extract text near the image
             try:
-                # Get the bounding box of the image
-                img_rect = page.get_image_bbox(img)
                 # Extend the bounding box slightly
-                extended_rect = fitz.Rect(img_rect).extend(50)
+                extended_rect = fitz.Rect(bbox).extend(50)
                 nearby_text = page.get_text("text", clip=extended_rect)
-            except AttributeError:
-                # Fallback if the above method is not available
+            except Exception:
+                # Fallback if the above method fails
                 nearby_text = page.get_text("text")
             
             # Use OCR to extract text from the image
-            image_text = pytesseract.image_to_string(image)
+            try:
+                image_text = pytesseract.image_to_string(image)
+            except Exception:
+                image_text = "OCR failed for this image"
             
             images.append({
                 'page': page_num + 1,
