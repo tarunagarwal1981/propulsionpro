@@ -13,3 +13,4 @@ langchain
 sentence-transformers 
 pytesseract
 qdrant-client
+imagehash
