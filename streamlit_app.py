@@ -13,9 +13,7 @@ import imagehash
 import uuid
 import os
 import openai
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-import time
+import base64
 
 # Function to get OpenAI API key
 def get_api_key():
@@ -167,6 +165,11 @@ def vectorize_pdfs():
                     embedding = model.encode(metadata_text).tolist()
                     point_id = str(uuid.uuid4())  # Generate a unique UUID for each point
 
+                    # Convert image to base64 for storage
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+
                     vectors.append(PointStruct(
                         id=point_id,
                         vector=embedding,
@@ -175,7 +178,8 @@ def vectorize_pdfs():
                             "page": page_num + 1,
                             "content": metadata_text,
                             "file_name": pdf_file_name,
-                            "image_index": img_index
+                            "image_index": img_index,
+                            "image_data": img_str
                         }
                     ))
 
@@ -209,26 +213,6 @@ def semantic_search(query, top_k=5):
         limit=top_k
     )
     return search_result
-
-# Function to get image from Cloudflare R2
-def get_image_from_r2(file_name, page, image_index):
-    try:
-        response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], file_name)
-        pdf_content = response.read()
-        doc = fitz.open(stream=pdf_content, filetype="pdf")
-        page_obj = doc[page - 1]  # Page numbers are 0-indexed
-        image_list = page_obj.get_images(full=True)
-        if image_index < len(image_list):
-            img = image_list[image_index]
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-            return Image.open(io.BytesIO(image_bytes))
-        else:
-            return None
-    except Exception as e:
-        st.error(f"Error retrieving image: {e}")
-        return None
 
 # Function to generate response using OpenAI
 def generate_response(query, context, images):
@@ -279,13 +263,12 @@ if user_query:
         st.write("Associated Images:")
         for result in search_results:
             if result.payload['type'] == 'image':
-                image = get_image_from_r2(
-                    result.payload['file_name'],
-                    result.payload['page'],
-                    result.payload['image_index']
-                )
-                if image:
+                image_data = result.payload.get('image_data')
+                if image_data:
+                    image = Image.open(io.BytesIO(base64.b64decode(image_data)))
                     st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+                else:
+                    st.write(f"Image data not found for {result.payload['file_name']}, Page {result.payload['page']}")
 
 st.sidebar.markdown("""
 ## How to use the system:
