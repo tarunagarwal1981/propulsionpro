@@ -13,6 +13,24 @@ import imagehash
 import uuid
 import os
 import openai
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+import time
+
+# Function to get OpenAI API key
+def get_api_key():
+    if 'openai' in st.secrets:
+        return st.secrets['openai']['api_key']
+    api_key = os.getenv('OPENAI_API_KEY')
+    if api_key is None:
+        raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
+    return api_key
+
+# Set OpenAI API key
+try:
+    openai.api_key = get_api_key()
+except ValueError as e:
+    st.error(str(e))
 
 # Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
@@ -50,18 +68,6 @@ try:
 except FileNotFoundError:
     st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
     reference_image_hash = None
-
-# Function to get OpenAI API key
-def get_api_key():
-    if 'openai' in st.secrets:
-        return st.secrets['openai']['api_key']
-    api_key = os.getenv('OPENAI_API_KEY')
-    if api_key is None:
-        raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
-    return api_key
-
-# Initialize OpenAI client
-openai_client = OpenAI(api_key=get_api_key())
 
 # Function to recreate the Qdrant collection
 def recreate_qdrant_collection():
@@ -225,20 +231,22 @@ def get_image_from_r2(file_name, page, image_index):
         return None
 
 # Function to generate response using OpenAI
-def generate_response(query, context):
+def generate_response(query, context, images):
+    image_descriptions = [f"Image on page {img.payload['page']}: {img.payload['content']}" for img in images if img.payload['type'] == 'image']
+    image_context = "\n".join(image_descriptions)
+
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4",
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are an AI assistant specializing in maintenance and overhaul procedures for various components. Provide detailed step-by-step instructions based on the given context."},
-                {"role": "user", "content": f"Query: {query}\n\nContext: {context}"}
-            ],
-            max_tokens=1000
+                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures."},
+                {"role": "user", "content": f"Context: {context}\n\nImage Context: {image_context}\n\nQuestion: {query}"}
+            ]
         )
-        return response.choices[0].message.content
+        return response.choices[0].message['content']
     except Exception as e:
-        st.error(f"Error generating response: {e}")
-        return None
+        st.error(f"OpenAI API call failed: {e}")
+        return ""
 
 # Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
@@ -261,7 +269,7 @@ if user_query:
     context = "\n".join([result.payload['content'] for result in search_results])
     
     # Generate response
-    response = generate_response(user_query, context)
+    response = generate_response(user_query, context, search_results)
     
     if response:
         st.write("Response:")
