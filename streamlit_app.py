@@ -40,12 +40,18 @@ qdrant_client = QdrantClient(
 
 # Function to recreate the Qdrant collection
 def recreate_qdrant_collection():
-    qdrant_client.recreate_collection(
+    try:
+        qdrant_client.delete_collection(collection_name="manual_vectors")
+    except Exception as e:
+        st.warning(f"Failed to delete existing collection: {e}")
+
+    # Create or recreate the Qdrant collection with proper configuration
+    qdrant_client.create_collection(
         collection_name="manual_vectors",
-        vectors_config=VectorParams(
+        vectors_config={"manual_vectors": VectorParams(
             size=384,  # Size of the vector (embedding dimension)
             distance="Cosine"
-        )
+        )}
     )
 
 # Function to extract text and images from PDFs, vectorize, and store in Qdrant
