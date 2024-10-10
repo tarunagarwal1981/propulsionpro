@@ -6,12 +6,11 @@ from minio.error import S3Error
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct
+from qdrant_client.models import PointStruct, VectorParams
 import pytesseract
 import re
-import time
 
-# Load the embedding model
+# Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
@@ -43,11 +42,13 @@ qdrant_client = QdrantClient(
 def recreate_qdrant_collection():
     qdrant_client.recreate_collection(
         collection_name="manual_vectors",
-        vector_size=384,  # Size depends on the embedding model output
-        distance="Cosine"
+        vectors_config=VectorParams(
+            size=384,  # Size of the vector (embedding dimension)
+            distance="Cosine"
+        )
     )
 
-# Function to extract text and images from PDF, vectorize, and store in Qdrant
+# Function to extract text and images from PDFs, vectorize, and store in Qdrant
 def vectorize_pdfs():
     if not minio_client:
         st.error("MinIO client not initialized.")
