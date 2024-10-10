@@ -10,6 +10,7 @@ from qdrant_client.models import PointStruct, VectorParams
 import pytesseract
 import re
 import imagehash
+import uuid  # Import for UUID generation
 
 # Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
@@ -83,7 +84,6 @@ def vectorize_pdfs():
         return
 
     vectors = []
-    current_id = 0
 
     # Process each PDF file
     for pdf_file_name in pdf_file_names:
@@ -101,8 +101,9 @@ def vectorize_pdfs():
                 for sentence in sentences:
                     if len(sentence.strip()) > 0:
                         embedding = model.encode(sentence.strip()).tolist()
+                        point_id = str(uuid.uuid4())  # Generate a unique UUID for each point
                         vectors.append(PointStruct(
-                            id=str(current_id),
+                            id=point_id,
                             vector=embedding,
                             payload={
                                 "type": "text",
@@ -111,7 +112,6 @@ def vectorize_pdfs():
                                 "file_name": pdf_file_name
                             }
                         ))
-                        current_id += 1
 
                 # Extract and vectorize images
                 image_list = page.get_images(full=True)
@@ -145,9 +145,10 @@ def vectorize_pdfs():
                     # Vectorize image with metadata (nearby and OCR text)
                     metadata_text = f"Image OCR text: {image_text}. Nearby text: {nearby_text}."
                     embedding = model.encode(metadata_text).tolist()
+                    point_id = str(uuid.uuid4())  # Generate a unique UUID for each point
 
                     vectors.append(PointStruct(
-                        id=str(current_id),
+                        id=point_id,
                         vector=embedding,
                         payload={
                             "type": "image",
@@ -157,7 +158,6 @@ def vectorize_pdfs():
                             "image_index": img_index
                         }
                     ))
-                    current_id += 1
 
             doc.close()
 
