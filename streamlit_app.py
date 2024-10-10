@@ -9,6 +9,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams
 import pytesseract
 import re
+import imagehash
 
 # Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
@@ -38,6 +39,15 @@ qdrant_client = QdrantClient(
     api_key=st.secrets["qdrant"]["api_key"]
 )
 
+# Load the reference header image from the assets folder and calculate its hash
+reference_image_path = "assets/header_image.png"  # Adjust the path based on your repository structure
+try:
+    reference_image = Image.open(reference_image_path)
+    reference_image_hash = imagehash.phash(reference_image)
+except FileNotFoundError:
+    st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
+    reference_image_hash = None
+
 # Function to recreate the Qdrant collection
 def recreate_qdrant_collection():
     try:
@@ -48,16 +58,20 @@ def recreate_qdrant_collection():
     # Create or recreate the Qdrant collection with proper configuration
     qdrant_client.create_collection(
         collection_name="manual_vectors",
-        vectors_config={"manual_vectors": VectorParams(
+        vectors_config=VectorParams(
             size=384,  # Size of the vector (embedding dimension)
             distance="Cosine"
-        )}
+        )
     )
 
 # Function to extract text and images from PDFs, vectorize, and store in Qdrant
 def vectorize_pdfs():
     if not minio_client:
         st.error("MinIO client not initialized.")
+        return
+
+    if reference_image_hash is None:
+        st.error("Reference header image hash could not be calculated.")
         return
     
     # Get list of all PDFs from Cloudflare R2
@@ -107,6 +121,13 @@ def vectorize_pdfs():
                     image_bytes = base_image["image"]
                     image = Image.open(io.BytesIO(image_bytes))
 
+                    # Calculate the hash of the image
+                    image_hash = imagehash.phash(image)
+
+                    # Skip the image if it matches the reference header image hash
+                    if image_hash == reference_image_hash:
+                        continue
+
                     # Perform OCR on the image
                     try:
                         image_text = pytesseract.image_to_string(image)
@@ -145,9 +166,17 @@ def vectorize_pdfs():
         except Exception as e:
             st.error(f"Error processing file {pdf_file_name}: {e}")
 
-    # Recreate Qdrant collection and store the new vectors
+    # Recreate Qdrant collection and store the new vectors in smaller batches
     recreate_qdrant_collection()
-    qdrant_client.upsert(collection_name="manual_vectors", points=vectors)
+
+    # Batch size to keep the request payload below the limit (adjust as necessary)
+    batch_size = 100
+    for i in range(0, len(vectors), batch_size):
+        batch = vectors[i:i + batch_size]
+        try:
+            qdrant_client.upsert(collection_name="manual_vectors", points=batch)
+        except Exception as e:
+            st.error(f"Error upserting batch {i // batch_size}: {e}")
 
 # Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
@@ -159,7 +188,8 @@ if st.button("Vectorize PDFs"):
 
 st.sidebar.markdown("""
 ## How to use the system:
-1. Click the "Vectorize PDFs" button to vectorize all the available PDFs.
-2. The PDFs will be vectorized, and both text and images will be stored in Qdrant with metadata.
-3. The vectors are replaced each time the button is clicked.
+1. The reference header image is already stored in the Git repository.
+2. Click the "Vectorize PDFs" button to vectorize all the available PDFs.
+3. The PDFs will be vectorized, and both text and images will be stored in Qdrant with metadata.
+4. The vectors are replaced each time the button is clicked.
 """)
