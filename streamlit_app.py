@@ -155,7 +155,7 @@ def vectorize_pdfs():
                     # Get nearby text from the page
                     bbox = img[1]
                     try:
-                        extended_rect = fitz.Rect(bbox).extend(50)
+                        extended_rect = fitz.Rect(bbox).expand(50)
                         nearby_text = page.get_text("text", clip=extended_rect)
                     except Exception:
                         nearby_text = "No nearby text found"
@@ -265,8 +265,11 @@ if user_query:
             if result.payload['type'] == 'image':
                 image_data = result.payload.get('image_data')
                 if image_data:
-                    image = Image.open(io.BytesIO(base64.b64decode(image_data)))
-                    st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+                    try:
+                        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+                        st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+                    except Exception as e:
+                        st.warning(f"Failed to decode image data for {result.payload['file_name']}, Page {result.payload['page']}: {e}")
                 else:
                     st.write(f"Image data not found for {result.payload['file_name']}, Page {result.payload['page']}")
 
