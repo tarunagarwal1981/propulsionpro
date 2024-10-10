@@ -10,7 +10,7 @@ from qdrant_client.models import PointStruct, VectorParams
 import pytesseract
 import re
 import imagehash
-import uuid  # Import for UUID generation
+import uuid
 
 # Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
@@ -177,6 +177,8 @@ def vectorize_pdfs():
             qdrant_client.upsert(collection_name="manual_vectors", points=batch)
         except Exception as e:
             st.error(f"Error upserting batch {i // batch_size}: {e}")
+
+    st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
 
 # Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
