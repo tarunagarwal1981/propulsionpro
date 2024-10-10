@@ -1,18 +1,19 @@
 import streamlit as st
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF for PDF extraction
 import io
-import os
 from minio import Minio
 from minio.error import S3Error
 from PIL import Image
-import openai
-import re
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct, VectorParams
 import pytesseract
-from io import BytesIO
-import time
+import re
+import imagehash
+import uuid
+import os
+import openai
+import base64
 
 # Function to get OpenAI API key
 def get_api_key():
@@ -29,18 +30,14 @@ try:
 except ValueError as e:
     st.error(str(e))
 
-# Lazy load SentenceTransformer model (initialize only when required)
+# Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
 def load_model():
-    try:
-        return SentenceTransformer('all-MiniLM-L6-v2')
-    except Exception as e:
-        st.error(f"Failed to load model: {e}")
-        return None
+    return SentenceTransformer('all-MiniLM-L6-v2')
 
-model = None
+model = load_model()
 
-# Initialize MinIO client (for R2)
+# Initialize MinIO client for Cloudflare R2
 def initialize_minio():
     try:
         return Minio(
@@ -55,117 +52,171 @@ def initialize_minio():
 
 minio_client = initialize_minio()
 
-if minio_client:
-    try:
-        BUCKET_NAME = st.secrets["R2_BUCKET_NAME"]
-    except KeyError:
-        st.error("MinIO initialization failed: Missing bucket name")
+# Initialize Qdrant client
+qdrant_client = QdrantClient(
+    url=st.secrets["qdrant"]["url"],
+    api_key=st.secrets["qdrant"]["api_key"]
+)
 
-# Function to get PDF from R2
-def get_pdf_from_r2(file_name):
-    try:
-        response = minio_client.get_object(BUCKET_NAME, file_name)
-        return response.read()
-    except S3Error as exc:
-        st.error(f"Error downloading file from R2: {exc}")
-        return None
+# Load the reference header image from the assets folder and calculate its hash
+reference_image_path = "assets/header_image.png"  # Adjust the path based on your repository structure
+try:
+    reference_image = Image.open(reference_image_path)
+    reference_image_hash = imagehash.phash(reference_image)
+except FileNotFoundError:
+    st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
+    reference_image_hash = None
 
-# Extract text and images from PDF
-def extract_content_with_metadata(pdf_content):
-    text_content = []
-    images = []
+# Function to recreate the Qdrant collection
+def recreate_qdrant_collection():
     try:
-        doc = fitz.open(stream=pdf_content, filetype="pdf")
-        for page_num, page in enumerate(doc):
-            text = page.get_text()
-            text_content.append({
-                'page': page_num + 1,
-                'content': text
-            })
-            
-            # Get all images on the page
-            image_list = page.get_images(full=True)
-            for img_index, img in enumerate(image_list):
-                xref = img[0]
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                image = Image.open(io.BytesIO(image_bytes))
-                
-                # Get image rectangle (bbox) directly from the image info
-                bbox = img[1]
-                
-                # Extract text near the image
-                try:
-                    extended_rect = fitz.Rect(bbox).extend(50)
-                    nearby_text = page.get_text("text", clip=extended_rect)
-                except Exception:
-                    nearby_text = page.get_text("text")
-                
-                # Use OCR to extract text from the image
-                try:
-                    image_text = pytesseract.image_to_string(image)
-                except Exception:
-                    image_text = "OCR failed for this image"
-                
-                images.append({
-                    'page': page_num + 1,
-                    'index': img_index,
-                    'image': image,
-                    'nearby_text': nearby_text,
-                    'image_text': image_text
-                })
+        qdrant_client.delete_collection(collection_name="manual_vectors")
     except Exception as e:
-        st.error(f"Failed to extract content: {e}")
-    return text_content, images
+        st.warning(f"Failed to delete existing collection: {e}")
 
-# Chunk text into smaller parts
-def chunk_text_with_metadata(text_content, chunk_size=500):
-    chunks = []
-    for page_data in text_content:
-        page_num = page_data['page']
-        text = page_data['content']
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        current_chunk = []
-        current_size = 0
-        for sentence in sentences:
-            if current_size + len(sentence) <= chunk_size:
-                current_chunk.append(sentence)
-                current_size += len(sentence)
-            else:
-                chunks.append({
-                    'page': page_num,
-                    'content': ' '.join(current_chunk)
-                })
-                current_chunk = [sentence]
-                current_size = len(sentence)
-        if current_chunk:
-            chunks.append({
-                'page': page_num,
-                'content': ' '.join(current_chunk)
-            })
-    return chunks
+    # Create or recreate the Qdrant collection with proper configuration
+    qdrant_client.create_collection(
+        collection_name="manual_vectors",
+        vectors_config=VectorParams(
+            size=384,  # Size of the vector (embedding dimension)
+            distance="Cosine"
+        )
+    )
 
-# Vectorize chunks
-def vectorize_chunks(chunks):
-    global model
-    if model is None:
-        with st.spinner('Loading model, please wait...'):
-            model = load_model()
-            time.sleep(2)  # Give some time for health checks to pass
-    if model is not None:
-        return [model.encode(chunk['content']) for chunk in chunks]
-    return []
+# Function to extract text and images from PDFs, vectorize, and store in Qdrant
+def vectorize_pdfs():
+    if not minio_client:
+        st.error("MinIO client not initialized.")
+        return
 
-# Find most relevant chunk based on query
-def find_most_relevant_chunk(query, chunks, chunk_vectors):
-    query_vector = model.encode(query)
-    similarities = cosine_similarity([query_vector], chunk_vectors)[0]
-    most_relevant_index = np.argmax(similarities)
-    return chunks[most_relevant_index], similarities[most_relevant_index]
+    if reference_image_hash is None:
+        st.error("Reference header image hash could not be calculated.")
+        return
+    
+    # Get list of all PDFs from Cloudflare R2
+    try:
+        objects = minio_client.list_objects(st.secrets["R2_BUCKET_NAME"], recursive=True)
+        pdf_file_names = [obj.object_name for obj in objects if obj.object_name.endswith('.pdf')]
+    except S3Error as e:
+        st.error(f"Error listing PDF files from Cloudflare R2: {e}")
+        return
 
-# Generate an answer using OpenAI
-def answer_query(query, context, images):
-    image_descriptions = [f"Image on page {img['page']}: {img['image_text']}" for img in images if img['page'] == context['page']]
+    vectors = []
+
+    # Process each PDF file
+    for pdf_file_name in pdf_file_names:
+        try:
+            response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
+            pdf_content = response.read()
+            doc = fitz.open(stream=pdf_content, filetype="pdf")
+
+            # Extract text and images
+            for page_num, page in enumerate(doc):
+                text = page.get_text()
+                sentences = re.split(r'(?<=[.!?])\s+', text)
+
+                # Vectorize text chunks
+                for sentence in sentences:
+                    if len(sentence.strip()) > 0:
+                        embedding = model.encode(sentence.strip()).tolist()
+                        point_id = str(uuid.uuid4())  # Generate a unique UUID for each point
+                        vectors.append(PointStruct(
+                            id=point_id,
+                            vector=embedding,
+                            payload={
+                                "type": "text",
+                                "page": page_num + 1,
+                                "content": sentence.strip(),
+                                "file_name": pdf_file_name
+                            }
+                        ))
+
+                # Extract and vectorize images
+                image_list = page.get_images(full=True)
+                for img_index, img in enumerate(image_list):
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image = Image.open(io.BytesIO(image_bytes))
+
+                    # Calculate the hash of the image
+                    image_hash = imagehash.phash(image)
+
+                    # Skip the image if it matches the reference header image hash
+                    if image_hash == reference_image_hash:
+                        continue
+
+                    # Perform OCR on the image
+                    try:
+                        image_text = pytesseract.image_to_string(image)
+                    except Exception:
+                        image_text = "OCR failed for this image"
+
+                    # Get nearby text from the page
+                    bbox = img[1]
+                    try:
+                        extended_rect = fitz.Rect(bbox).expand(50)
+                        nearby_text = page.get_text("text", clip=extended_rect)
+                    except Exception:
+                        nearby_text = "No nearby text found"
+
+                    # Vectorize image with metadata (nearby and OCR text)
+                    metadata_text = f"Image OCR text: {image_text}. Nearby text: {nearby_text}."
+                    embedding = model.encode(metadata_text).tolist()
+                    point_id = str(uuid.uuid4())  # Generate a unique UUID for each point
+
+                    # Convert image to base64 for storage
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+
+                    vectors.append(PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload={
+                            "type": "image",
+                            "page": page_num + 1,
+                            "content": metadata_text,
+                            "file_name": pdf_file_name,
+                            "image_index": img_index,
+                            "image_data": img_str
+                        }
+                    ))
+
+            doc.close()
+
+        except S3Error as e:
+            st.error(f"Error downloading file {pdf_file_name} from Cloudflare R2: {e}")
+        except Exception as e:
+            st.error(f"Error processing file {pdf_file_name}: {e}")
+
+    # Recreate Qdrant collection and store the new vectors in smaller batches
+    recreate_qdrant_collection()
+
+    # Batch size to keep the request payload below the limit (adjust as necessary)
+    batch_size = 100
+    for i in range(0, len(vectors), batch_size):
+        batch = vectors[i:i + batch_size]
+        try:
+            qdrant_client.upsert(collection_name="manual_vectors", points=batch)
+        except Exception as e:
+            st.error(f"Error upserting batch {i // batch_size}: {e}")
+
+    st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
+
+# Function to perform semantic search in Qdrant
+def semantic_search(query, top_k=5):
+    query_vector = model.encode(query).tolist()
+    search_result = qdrant_client.search(
+        collection_name="manual_vectors",
+        query_vector=query_vector,
+        limit=top_k
+    )
+    return search_result
+
+# Function to generate response using OpenAI
+def generate_response(query, context, images):
+    image_descriptions = [f"Image on page {img.payload['page']}: {img.payload['content']}" for img in images if img.payload['type'] == 'image']
     image_context = "\n".join(image_descriptions)
 
     try:
@@ -173,7 +224,7 @@ def answer_query(query, context, images):
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures."},
-                {"role": "user", "content": f"Context: {context['content']}\n\nImage Context: {image_context}\n\nQuestion: {query}"}
+                {"role": "user", "content": f"Context: {context}\n\nImage Context: {image_context}\n\nQuestion: {query}"}
             ]
         )
         return response.choices[0].message['content']
@@ -182,46 +233,51 @@ def answer_query(query, context, images):
         return ""
 
 # Streamlit UI
-st.title('PropulsionPro: Marine Engine Manual Query System')
+st.title('PropulsionPro: Vectorization and Query System')
 
-if minio_client:
-    try:
-        objects = minio_client.list_objects(BUCKET_NAME, recursive=True)
-        pdf_file_names = [obj.object_name for obj in objects if obj.object_name.endswith('.pdf')]
-    except S3Error as exc:
-        st.error(f"Error listing objects in R2: {exc}")
-        pdf_file_names = []
+# Vectorize PDFs button
+if st.button("Vectorize PDFs"):
+    with st.spinner("Vectorizing all PDFs from Cloudflare R2 and saving in Qdrant..."):
+        vectorize_pdfs()
+        st.success("All PDFs have been successfully vectorized and saved in Qdrant!")
 
-    selected_file = st.selectbox('Select a PDF manual:', pdf_file_names)
+# Chat interface
+st.subheader("Chat with PropulsionPro")
+user_query = st.text_input("Enter your query about maintenance or overhaul procedures:")
 
-    if selected_file:
-        pdf_content = get_pdf_from_r2(selected_file)
-        if pdf_content:
-            st.success(f'Manual "{selected_file}" successfully loaded from R2!')
-            text_content, images = extract_content_with_metadata(pdf_content)
-            chunks = chunk_text_with_metadata(text_content)
-            chunk_vectors = vectorize_chunks(chunks)
-
-            query = st.text_input('Enter your maintenance query:')
-            if query:
-                with st.spinner('Processing your query...'):
-                    relevant_chunk, similarity_score = find_most_relevant_chunk(query, chunks, chunk_vectors)
-                    response = answer_query(query, relevant_chunk, images)
-                st.subheader('Answer:')
-                st.write(response)
-                st.write(f"Confidence: {similarity_score:.2f}")
-
-                st.subheader('Related Images:')
-                relevant_images = [img for img in images if img['page'] == relevant_chunk['page']]
-                for img in relevant_images:
-                    st.image(img['image'], caption=f"Image on page {img['page']}", use_column_width=True)
-                    st.write(f"Nearby text: {img['nearby_text'][:200]}...")
-                    st.write(f"Image text: {img['image_text']}")
+if user_query:
+    # Perform semantic search
+    search_results = semantic_search(user_query)
+    
+    # Prepare context for OpenAI
+    context = "\n".join([result.payload['content'] for result in search_results])
+    
+    # Generate response
+    response = generate_response(user_query, context, search_results)
+    
+    if response:
+        st.write("Response:")
+        st.write(response)
+        
+        # Display associated images
+        st.write("Associated Images:")
+        for result in search_results:
+            if result.payload['type'] == 'image':
+                image_data = result.payload.get('image_data')
+                if image_data:
+                    try:
+                        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+                        image = image.convert("RGB")  # Convert to RGB to ensure compatibility
+                        st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+                    except Exception as e:
+                        st.warning(f"Failed to decode image data for {result.payload['file_name']}, Page {result.payload['page']}: {e}")
+                else:
+                    st.write(f"Image data not found for {result.payload['file_name']}, Page {result.payload['page']}")
 
 st.sidebar.markdown("""
-## How to use PropulsionPro:
-1. Select a PDF manual from the dropdown.
-2. Wait for the manual to load and process.
-3. Enter your maintenance query in the search box.
-4. View the answer, confidence score, and related images below.
+## How to use the system:
+1. The reference header image is already stored in the Git repository.
+2. Click the "Vectorize PDFs" button to vectorize all the available PDFs (if not done already).
+3. Enter your query about maintenance or overhaul procedures in the chat interface.
+4. The system will provide a detailed response along with associated images.
 """)
