@@ -11,6 +11,8 @@ import pytesseract
 import re
 import imagehash
 import uuid
+import os
+from openai import OpenAI
 
 # Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
@@ -48,6 +50,18 @@ try:
 except FileNotFoundError:
     st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
     reference_image_hash = None
+
+# Function to get OpenAI API key
+def get_api_key():
+    if 'openai' in st.secrets:
+        return st.secrets['openai']['api_key']
+    api_key = os.getenv('OPENAI_API_KEY')
+    if api_key is None:
+        raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
+    return api_key
+
+# Initialize OpenAI client
+openai_client = OpenAI(api_key=get_api_key())
 
 # Function to recreate the Qdrant collection
 def recreate_qdrant_collection():
@@ -180,18 +194,95 @@ def vectorize_pdfs():
 
     st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
 
+# Function to perform semantic search in Qdrant
+def semantic_search(query, top_k=5):
+    query_vector = model.encode(query).tolist()
+    search_result = qdrant_client.search(
+        collection_name="manual_vectors",
+        query_vector=query_vector,
+        limit=top_k
+    )
+    return search_result
+
+# Function to get image from Cloudflare R2
+def get_image_from_r2(file_name, page, image_index):
+    try:
+        response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], file_name)
+        pdf_content = response.read()
+        doc = fitz.open(stream=pdf_content, filetype="pdf")
+        page_obj = doc[page - 1]  # Page numbers are 0-indexed
+        image_list = page_obj.get_images(full=True)
+        if image_index < len(image_list):
+            img = image_list[image_index]
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            return Image.open(io.BytesIO(image_bytes))
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Error retrieving image: {e}")
+        return None
+
+# Function to generate response using OpenAI
+def generate_response(query, context):
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are an AI assistant specializing in maintenance and overhaul procedures for various components. Provide detailed step-by-step instructions based on the given context."},
+                {"role": "user", "content": f"Query: {query}\n\nContext: {context}"}
+            ],
+            max_tokens=1000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        st.error(f"Error generating response: {e}")
+        return None
+
 # Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
 
+# Vectorize PDFs button
 if st.button("Vectorize PDFs"):
     with st.spinner("Vectorizing all PDFs from Cloudflare R2 and saving in Qdrant..."):
         vectorize_pdfs()
         st.success("All PDFs have been successfully vectorized and saved in Qdrant!")
 
+# Chat interface
+st.subheader("Chat with PropulsionPro")
+user_query = st.text_input("Enter your query about maintenance or overhaul procedures:")
+
+if user_query:
+    # Perform semantic search
+    search_results = semantic_search(user_query)
+    
+    # Prepare context for OpenAI
+    context = "\n".join([result.payload['content'] for result in search_results])
+    
+    # Generate response
+    response = generate_response(user_query, context)
+    
+    if response:
+        st.write("Response:")
+        st.write(response)
+        
+        # Display associated images
+        st.write("Associated Images:")
+        for result in search_results:
+            if result.payload['type'] == 'image':
+                image = get_image_from_r2(
+                    result.payload['file_name'],
+                    result.payload['page'],
+                    result.payload['image_index']
+                )
+                if image:
+                    st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+
 st.sidebar.markdown("""
 ## How to use the system:
 1. The reference header image is already stored in the Git repository.
-2. Click the "Vectorize PDFs" button to vectorize all the available PDFs.
-3. The PDFs will be vectorized, and both text and images will be stored in Qdrant with metadata.
-4. The vectors are replaced each time the button is clicked.
+2. Click the "Vectorize PDFs" button to vectorize all the available PDFs (if not done already).
+3. Enter your query about maintenance or overhaul procedures in the chat interface.
+4. The system will provide a detailed response along with associated images.
 """)
