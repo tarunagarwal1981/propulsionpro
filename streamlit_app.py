@@ -12,7 +12,7 @@ import re
 import imagehash
 import uuid
 import os
-from openai import OpenAI
+import openai
 
 # Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
