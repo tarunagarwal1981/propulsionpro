@@ -184,6 +184,7 @@ def vectorize_pdfs():
                         }
                     ))
                     extracted_images_count += 1
+                    st.write(f"Extracted and vectorized image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
 
             doc.close()
 
@@ -201,6 +202,7 @@ def vectorize_pdfs():
         batch = vectors[i:i + batch_size]
         try:
             qdrant_client.upsert(collection_name="manual_vectors", points=batch)
+            st.write(f"Successfully upserted batch {i // batch_size + 1}")
         except Exception as e:
             st.error(f"Error upserting batch {i // batch_size}: {e}")
 
@@ -214,6 +216,9 @@ def semantic_search(query, top_k=5):
         query_vector=query_vector,
         limit=top_k
     )
+    st.write(f"Semantic search returned {len(search_result)} results.")
+    for i, result in enumerate(search_result):
+        st.write(f"Result {i + 1}: {result.payload['type']} from file {result.payload['file_name']}, Page {result.payload['page']}")
     return search_result
 
 # Function to generate response using OpenAI
