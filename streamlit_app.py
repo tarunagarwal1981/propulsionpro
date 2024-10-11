@@ -59,16 +59,23 @@ def recreate_qdrant_collection():
 
 def extract_structure(page):
     """Extract structural information from a page."""
-    blocks = page.get_text("dict")["blocks"]
-    headings = []
-    paragraphs = []
-    for block in blocks:
-        if block["type"] == 0:  # Text block
-            if any(line["size"] > 12 for line in block["lines"]):  # Assuming headings are larger
-                headings.append(" ".join(span["text"] for line in block["lines"] for span in line["spans"]))
-            else:
-                paragraphs.append(" ".join(span["text"] for line in block["lines"] for span in line["spans"]))
-    return headings, paragraphs
+    try:
+        blocks = page.get_text("dict")["blocks"]
+        headings = []
+        paragraphs = []
+        for block in blocks:
+            if block["type"] == 0:  # Text block
+                try:
+                    if any(line.get("size", 0) > 12 for line in block.get("lines", [])):  # Assuming headings are larger
+                        headings.append(" ".join(span["text"] for line in block.get("lines", []) for span in line.get("spans", [])))
+                    else:
+                        paragraphs.append(" ".join(span["text"] for line in block.get("lines", []) for span in line.get("spans", [])))
+                except Exception as e:
+                    st.warning(f"Error processing block: {str(e)}")
+        return headings, paragraphs
+    except Exception as e:
+        st.warning(f"Error in extract_structure: {str(e)}")
+        return [], [page.get_text()]  # Fallback to simple text extraction
 
 def vectorize_pdfs():
     if not minio_client:
@@ -96,79 +103,83 @@ def vectorize_pdfs():
             doc = fitz.open(stream=pdf_content, filetype="pdf")
 
             for page_num, page in enumerate(doc):
-                headings, paragraphs = extract_structure(page)
-                
-                # Vectorize text content
-                for text in headings + paragraphs:
-                    embedding = model.encode(text).tolist()
-                    point_id = str(uuid.uuid4())
-                    vectors.append(PointStruct(
-                        id=point_id,
-                        vector=embedding,
-                        payload={
-                            "type": "text",
-                            "page": page_num + 1,
-                            "content": text,
-                            "file_name": pdf_file_name,
-                            "is_heading": text in headings
-                        }
-                    ))
-
-                # Extract and vectorize images
-                image_list = page.get_images(full=True)
-                st.write(f"Found {len(image_list)} images on page {page_num + 1} of {pdf_file_name}")
-                
-                for img_index, img in enumerate(image_list):
-                    xref = img[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image = Image.open(io.BytesIO(image_bytes))
-
-                    image_hash = imagehash.phash(image)
-                    if image_hash == reference_image_hash:
-                        continue
-
-                    try:
-                        image_text = pytesseract.image_to_string(image)
-                    except Exception:
-                        image_text = "OCR failed for this image"
-
-                    # Create metadata using page content and structure
-                    metadata_text = f"Page {page_num + 1}\n"
-                    metadata_text += f"Headings: {'; '.join(headings)}\n"
-                    metadata_text += f"Image OCR text: {image_text}\n"
-                    metadata_text += f"Page content: {' '.join(paragraphs)[:500]}..."  # Truncate to avoid overly long metadata
+                try:
+                    headings, paragraphs = extract_structure(page)
                     
-                    embedding = model.encode(metadata_text).tolist()
-                    point_id = str(uuid.uuid4())
+                    # Vectorize text content
+                    for text in headings + paragraphs:
+                        embedding = model.encode(text).tolist()
+                        point_id = str(uuid.uuid4())
+                        vectors.append(PointStruct(
+                            id=point_id,
+                            vector=embedding,
+                            payload={
+                                "type": "text",
+                                "page": page_num + 1,
+                                "content": text,
+                                "file_name": pdf_file_name,
+                                "is_heading": text in headings
+                            }
+                        ))
 
-                    buffered = io.BytesIO()
-                    image.save(buffered, format="PNG")
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    # Extract and vectorize images
+                    image_list = page.get_images(full=True)
+                    st.write(f"Found {len(image_list)} images on page {page_num + 1} of {pdf_file_name}")
+                    
+                    for img_index, img in enumerate(image_list):
+                        xref = img[0]
+                        base_image = doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        image = Image.open(io.BytesIO(image_bytes))
 
-                    vectors.append(PointStruct(
-                        id=point_id,
-                        vector=embedding,
-                        payload={
-                            "type": "image",
-                            "page": page_num + 1,
-                            "content": metadata_text,
-                            "file_name": pdf_file_name,
-                            "image_index": img_index,
-                            "image_data": img_str,
-                        }
-                    ))
-                    extracted_images_count += 1
+                        image_hash = imagehash.phash(image)
+                        if image_hash == reference_image_hash:
+                            continue
 
-                    st.write(f"Extracted image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
-                    st.write(f"Image metadata: {metadata_text[:100]}...")
+                        try:
+                            image_text = pytesseract.image_to_string(image)
+                        except Exception:
+                            image_text = "OCR failed for this image"
+
+                        # Create metadata using page content and structure
+                        metadata_text = f"Page {page_num + 1}\n"
+                        metadata_text += f"Headings: {'; '.join(headings)}\n"
+                        metadata_text += f"Image OCR text: {image_text}\n"
+                        metadata_text += f"Page content: {' '.join(paragraphs)[:500]}..."  # Truncate to avoid overly long metadata
+                        
+                        embedding = model.encode(metadata_text).tolist()
+                        point_id = str(uuid.uuid4())
+
+                        buffered = io.BytesIO()
+                        image.save(buffered, format="PNG")
+                        img_str = base64.b64encode(buffered.getvalue()).decode()
+
+                        vectors.append(PointStruct(
+                            id=point_id,
+                            vector=embedding,
+                            payload={
+                                "type": "image",
+                                "page": page_num + 1,
+                                "content": metadata_text,
+                                "file_name": pdf_file_name,
+                                "image_index": img_index,
+                                "image_data": img_str,
+                            }
+                        ))
+                        extracted_images_count += 1
+
+                        st.write(f"Extracted image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
+                        st.write(f"Image metadata: {metadata_text[:100]}...")
+
+                except Exception as e:
+                    st.warning(f"Error processing page {page_num + 1} of {pdf_file_name}: {str(e)}")
 
             doc.close()
 
         except S3Error as e:
             st.error(f"Error downloading file {pdf_file_name} from Cloudflare R2: {e}")
         except Exception as e:
-            st.error(f"Error processing file {pdf_file_name}: {e}")
+            st.error(f"Error processing file {pdf_file_name}: {str(e)}")
 
     recreate_qdrant_collection()
 
