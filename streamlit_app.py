@@ -14,8 +14,6 @@ import uuid
 import os
 import openai
 import base64
-from pdf2image import convert_from_bytes
-import numpy as np
 
 # Set page config at the very beginning
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
@@ -59,12 +57,6 @@ def recreate_qdrant_collection():
         )
     )
 
-def classify_image(image_array):
-    # Placeholder function for image classification
-    # In a real-world scenario, you'd implement or use a pre-trained model here
-    # For now, we'll return a dummy classification
-    return "engine_part"
-
 def vectorize_pdfs():
     if not minio_client:
         st.error("MinIO client not initialized.")
@@ -88,17 +80,13 @@ def vectorize_pdfs():
         try:
             response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
             pdf_content = response.read()
-            
-            # Convert PDF to images
-            images = convert_from_bytes(pdf_content)
-            
-            for page_num, image in enumerate(images):
-                # Extract text using PyMuPDF
-                doc = fitz.open(stream=pdf_content, filetype="pdf")
+            doc = fitz.open(stream=pdf_content, filetype="pdf")
+
+            for page_num in range(len(doc)):
                 page = doc[page_num]
-                text = page.get_text()
                 
-                # Process text and create text vectors
+                # Extract and process text
+                text = page.get_text()
                 sentences = re.split(r'(?<=[.!?])\s+', text)
                 for sentence in sentences:
                     if len(sentence.strip()) > 0:
@@ -114,46 +102,55 @@ def vectorize_pdfs():
                             }
                         ))
 
-                # Process image
-                img_array = np.array(image)
-                image_class = classify_image(img_array)
+                # Extract and process images
+                image_list = page.get_images(full=True)
+                st.write(f"Found {len(image_list)} images on page {page_num + 1} of {pdf_file_name}")
                 
-                # Create rich metadata for the image
-                metadata_text = f"Page {page_num + 1}\n"
-                metadata_text += f"Image Class: {image_class}\n"
-                metadata_text += f"Page Content: {text[:500]}..."  # Include more context
-                
-                # Perform OCR on the image
-                try:
-                    image_text = pytesseract.image_to_string(image)
-                    metadata_text += f"\nImage OCR text: {image_text}"
-                except Exception as e:
-                    st.warning(f"OCR failed for image on page {page_num + 1} of {pdf_file_name}: {str(e)}")
-                
-                # Create image vector
-                image_vector = model.encode(metadata_text).tolist()
-                
-                # Store image data and vector
-                buffered = io.BytesIO()
-                image.save(buffered, format="PNG")
-                img_str = base64.b64encode(buffered.getvalue()).decode()
-                
-                vectors.append(PointStruct(
-                    id=str(uuid.uuid4()),
-                    vector=image_vector,
-                    payload={
-                        "type": "image",
-                        "page": page_num + 1,
-                        "content": metadata_text,
-                        "file_name": pdf_file_name,
-                        "image_data": img_str,
-                        "image_class": image_class
-                    }
-                ))
-                extracted_images_count += 1
-                
+                for img_index, img in enumerate(image_list):
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image = Image.open(io.BytesIO(image_bytes))
+
+                    # Skip reference header image
+                    image_hash = imagehash.phash(image)
+                    if image_hash == reference_image_hash:
+                        continue
+
+                    # Create rich metadata for the image
+                    metadata_text = f"Page {page_num + 1}\n"
+                    metadata_text += f"Page Content: {text[:500]}..."  # Include more context
+
+                    # Perform OCR on the image
+                    try:
+                        image_text = pytesseract.image_to_string(image)
+                        metadata_text += f"\nImage OCR text: {image_text}"
+                    except Exception as e:
+                        st.warning(f"OCR failed for image on page {page_num + 1} of {pdf_file_name}: {str(e)}")
+
+                    # Create image vector
+                    image_vector = model.encode(metadata_text).tolist()
+
+                    # Store image data and vector
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG")
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+
+                    vectors.append(PointStruct(
+                        id=str(uuid.uuid4()),
+                        vector=image_vector,
+                        payload={
+                            "type": "image",
+                            "page": page_num + 1,
+                            "content": metadata_text,
+                            "file_name": pdf_file_name,
+                            "image_data": img_str,
+                        }
+                    ))
+                    extracted_images_count += 1
+
                 st.write(f"Processed page {page_num + 1} of {pdf_file_name}")
-                
+
             doc.close()
 
         except S3Error as e:
@@ -252,7 +249,6 @@ def main():
                 image_data = result.payload.get('image_data')
                 st.write(f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
                 st.write(f"Image content: {result.payload['content'][:100]}...")
-                st.write(f"Image class: {result.payload['image_class']}")
                 st.write(f"Length of image data: {len(image_data) if image_data else 'No data'}")
                 if image_data:
                     try:
