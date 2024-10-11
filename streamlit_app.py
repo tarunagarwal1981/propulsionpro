@@ -7,7 +7,6 @@ from PIL import Image
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams, Filter, FieldCondition, MatchValue
-import pytesseract
 import re
 import imagehash
 import uuid
@@ -120,13 +119,7 @@ def vectorize_pdfs():
                     # Create rich metadata for the image
                     metadata_text = f"Page {page_num + 1}\n"
                     metadata_text += f"Page Content: {text[:500]}..."  # Include more context
-
-                    # Perform OCR on the image
-                    try:
-                        image_text = pytesseract.image_to_string(image)
-                        metadata_text += f"\nImage OCR text: {image_text}"
-                    except Exception as e:
-                        st.warning(f"OCR failed for image on page {page_num + 1} of {pdf_file_name}: {str(e)}")
+                    metadata_text += f"\nImage Hash: {str(image_hash)}"
 
                     # Create image vector
                     image_vector = model.encode(metadata_text).tolist()
@@ -145,6 +138,7 @@ def vectorize_pdfs():
                             "content": metadata_text,
                             "file_name": pdf_file_name,
                             "image_data": img_str,
+                            "image_hash": str(image_hash)
                         }
                     ))
                     extracted_images_count += 1
@@ -249,6 +243,7 @@ def main():
                 image_data = result.payload.get('image_data')
                 st.write(f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
                 st.write(f"Image content: {result.payload['content'][:100]}...")
+                st.write(f"Image hash: {result.payload.get('image_hash', 'N/A')}")
                 st.write(f"Length of image data: {len(image_data) if image_data else 'No data'}")
                 if image_data:
                     try:
