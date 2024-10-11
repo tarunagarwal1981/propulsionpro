@@ -14,3 +14,4 @@ sentence-transformers
 pytesseract
 qdrant-client
 imagehash
+pdf2image
