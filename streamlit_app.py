@@ -362,4 +362,71 @@ except FileNotFoundError:
     st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
     reference_image_hash = None
 
+
 # Run the main function
+if __name__ == "__main__":
+    main()
+
+# Add a footer
+st.markdown("""
+---
+Created by Your Company Name | © 2023 All Rights Reserved
+""")
+
+# Optional: Add some CSS to improve the app's appearance
+st.markdown("""
+<style>
+.stApp {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+.stButton>button {
+    width: 100%;
+}
+.streamlit-expanderHeader {
+    font-size: 18px;
+    font-weight: bold;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Optional: Add a help section
+with st.expander("Need Help?"):
+    st.markdown("""
+    ### Frequently Asked Questions
+
+    1. **How do I start using PropulsionPro?**
+       First, click the "Vectorize PDFs" button to process all available documents. Then, enter your question in the chat interface.
+
+    2. **Why am I not seeing any images in the results?**
+       Ensure that the PDFs contain images and that the vectorization process completed successfully. If issues persist, check the debug information.
+
+    3. **How can I improve the search results?**
+       Try rephrasing your query or using more specific terms related to marine engine maintenance.
+
+    4. **What should I do if I encounter an error?**
+       Check the error message for details. If you can't resolve the issue, contact the system administrator with the error details.
+
+    For more assistance, please refer to the user manual or contact support.
+    """)
+
+# Optional: Add a feedback mechanism
+with st.sidebar:
+    st.write("---")
+    st.write("We value your feedback!")
+    feedback = st.text_area("Please share your thoughts or report any issues:")
+    if st.button("Submit Feedback"):
+        # Here you would typically send this feedback to a database or email
+        st.success("Thank you for your feedback!")
+
+# Optional: Add a version number and update log
+st.sidebar.info("PropulsionPro v1.0.0")
+with st.sidebar.expander("Update Log"):
+    st.write("""
+    - v1.0.0: Initial release
+    - v0.9.0: Beta testing phase
+    - v0.8.0: Improved image processing
+    - v0.7.0: Enhanced semantic search
+    """)
+
+# End of the application
