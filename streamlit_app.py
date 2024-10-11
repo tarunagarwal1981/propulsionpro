@@ -134,6 +134,8 @@ def vectorize_pdfs():
 
                 # Extract and vectorize images
                 image_list = page.get_images(full=True)
+                st.write(f"Found {len(image_list)} images on page {page_num + 1} of {pdf_file_name}")
+                
                 for img_index, img in enumerate(image_list):
                     xref = img[0]
                     base_image = doc.extract_image(xref)
@@ -171,7 +173,10 @@ def vectorize_pdfs():
                     image.save(buffered, format="PNG")
                     img_str = base64.b64encode(buffered.getvalue()).decode()
 
-                    # Debug: Print sample of encoded image data
+                    # Debug: Print more information about the extracted image
+                    st.write(f"Extracted image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
+                    st.write(f"Image OCR text: {image_text[:100]}...")
+                    st.write(f"Nearby text: {nearby_text[:100]}...")
                     st.write(f"Sample of encoded image data: {img_str[:100]}")
 
                     vectors.append(PointStruct(
@@ -187,7 +192,6 @@ def vectorize_pdfs():
                         }
                     ))
                     extracted_images_count += 1
-                    st.write(f"Extracted and vectorized image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
 
             doc.close()
 
@@ -220,8 +224,12 @@ def semantic_search(query, top_k=5):
         limit=top_k
     )
     st.write(f"Semantic search returned {len(search_result)} results.")
+    st.write(f"Query: {query}")
+    st.write("Search results:")
     for i, result in enumerate(search_result):
         st.write(f"Result {i + 1}: {result.payload['type']} from file {result.payload['file_name']}, Page {result.payload['page']}")
+        st.write(f"Content: {result.payload['content'][:100]}...")
+        st.write(f"Score: {result.score}")
     return search_result
 
 # Function to generate response using OpenAI
@@ -271,22 +279,30 @@ if user_query:
         
         # Display associated images (with debugging)
         st.write("Associated Images:")
-        st.write(f"Number of image results: {sum(1 for result in search_results if result.payload['type'] == 'image')}")
-        
-        for result in search_results:
-            if result.payload['type'] == 'image':
-                image_data = result.payload.get('image_data')
-                st.write(f"Length of image data: {len(image_data) if image_data else 'No data'}")
-                if image_data:
-                    try:
-                        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
-                        image = image.convert("RGB")  # Convert to RGB to ensure compatibility
-                        st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
-                    except Exception as e:
-                        st.warning(f"Failed to decode image data: {str(e)}")
-                        st.write(f"Image data (first 100 chars): {image_data[:100]}")
-                else:
-                    st.write(f"Image data not found for {result.payload['file_name']}, Page {result.payload['page']}")
+        image_results = [result for result in search_results if result.payload['type'] == 'image']
+        st.write(f"Number of image results: {len(image_results)}")
+
+        if len(image_results) == 0:
+            st.write("No image results found. This could be due to:")
+            st.write("1. No images were extracted during vectorization.")
+            st.write("2. The semantic search didn't find relevant images for the query.")
+            st.write("3. Issues with image metadata or labeling.")
+
+        for result in image_results:
+            image_data = result.payload.get('image_data')
+            st.write(f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+            st.write(f"Image content: {result.payload['content'][:100]}...")
+            st.write(f"Length of image data: {len(image_data) if image_data else 'No data'}")
+            if image_data:
+                try:
+                    image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+                    image = image.convert("RGB")  # Convert to RGB to ensure compatibility
+                    st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+                except Exception as e:
+                    st.warning(f"Failed to decode image data: {str(e)}")
+                    st.write(f"Image data (first 100 chars): {image_data[:100]}")
+            else:
+                st.write("Image data not found.")
 
 st.sidebar.markdown("""
 ## How to use the system:
