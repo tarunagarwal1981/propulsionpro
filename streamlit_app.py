@@ -171,6 +171,9 @@ def vectorize_pdfs():
                     image.save(buffered, format="PNG")
                     img_str = base64.b64encode(buffered.getvalue()).decode()
 
+                    # Debug: Print sample of encoded image data
+                    st.write(f"Sample of encoded image data: {img_str[:100]}")
+
                     vectors.append(PointStruct(
                         id=point_id,
                         vector=embedding,
@@ -266,18 +269,22 @@ if user_query:
         st.write("Response:")
         st.write(response)
         
-        # Display associated images
+        # Display associated images (with debugging)
         st.write("Associated Images:")
+        st.write(f"Number of image results: {sum(1 for result in search_results if result.payload['type'] == 'image')}")
+        
         for result in search_results:
             if result.payload['type'] == 'image':
                 image_data = result.payload.get('image_data')
+                st.write(f"Length of image data: {len(image_data) if image_data else 'No data'}")
                 if image_data:
                     try:
                         image = Image.open(io.BytesIO(base64.b64decode(image_data)))
                         image = image.convert("RGB")  # Convert to RGB to ensure compatibility
                         st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
                     except Exception as e:
-                        st.warning(f"Failed to decode image data for {result.payload['file_name']}, Page {result.payload['page']}: {e}")
+                        st.warning(f"Failed to decode image data: {str(e)}")
+                        st.write(f"Image data (first 100 chars): {image_data[:100]}")
                 else:
                     st.write(f"Image data not found for {result.payload['file_name']}, Page {result.payload['page']}")
 
