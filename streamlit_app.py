@@ -6,7 +6,7 @@ from minio.error import S3Error
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, VectorParams
+from qdrant_client.models import PointStruct, VectorParams, Filter, FieldCondition, MatchValue
 import pytesseract
 import re
 import imagehash
@@ -116,11 +116,14 @@ def vectorize_pdfs():
                 text = page.get_text()
                 sentences = re.split(r'(?<=[.!?])\s+', text)
 
+                # Extract page heading (assuming it's the first line of text)
+                page_heading = sentences[0] if sentences else ""
+
                 # Vectorize text chunks
                 for sentence in sentences:
                     if len(sentence.strip()) > 0:
                         embedding = model.encode(sentence.strip()).tolist()
-                        point_id = str(uuid.uuid4())  # Generate a unique UUID for each point
+                        point_id = str(uuid.uuid4())
                         vectors.append(PointStruct(
                             id=point_id,
                             vector=embedding,
@@ -128,7 +131,8 @@ def vectorize_pdfs():
                                 "type": "text",
                                 "page": page_num + 1,
                                 "content": sentence.strip(),
-                                "file_name": pdf_file_name
+                                "file_name": pdf_file_name,
+                                "page_heading": page_heading
                             }
                         ))
 
@@ -155,29 +159,23 @@ def vectorize_pdfs():
                     except Exception:
                         image_text = "OCR failed for this image"
 
-                    # Get nearby text from the page
+                    # Get nearby text from the page (expanded)
                     bbox = img[1]
                     try:
-                        extended_rect = fitz.Rect(bbox).expand(50)
+                        extended_rect = fitz.Rect(bbox).expand(100)  # Increased expansion
                         nearby_text = page.get_text("text", clip=extended_rect)
                     except Exception:
                         nearby_text = "No nearby text found"
 
-                    # Vectorize image with metadata (nearby and OCR text)
-                    metadata_text = f"Image OCR text: {image_text}. Nearby text: {nearby_text}."
+                    # Vectorize image with metadata (nearby text, OCR text, page heading)
+                    metadata_text = f"Page {page_num + 1} - {page_heading}\nImage OCR text: {image_text}\nNearby text: {nearby_text}"
                     embedding = model.encode(metadata_text).tolist()
-                    point_id = str(uuid.uuid4())  # Generate a unique UUID for each point
+                    point_id = str(uuid.uuid4())
 
                     # Convert image to base64 for storage
                     buffered = io.BytesIO()
                     image.save(buffered, format="PNG")
                     img_str = base64.b64encode(buffered.getvalue()).decode()
-
-                    # Debug: Print more information about the extracted image
-                    st.write(f"Extracted image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
-                    st.write(f"Image OCR text: {image_text[:100]}...")
-                    st.write(f"Nearby text: {nearby_text[:100]}...")
-                    st.write(f"Sample of encoded image data: {img_str[:100]}")
 
                     vectors.append(PointStruct(
                         id=point_id,
@@ -188,10 +186,17 @@ def vectorize_pdfs():
                             "content": metadata_text,
                             "file_name": pdf_file_name,
                             "image_index": img_index,
-                            "image_data": img_str
+                            "image_data": img_str,
+                            "page_heading": page_heading
                         }
                     ))
                     extracted_images_count += 1
+
+                    # Debug: Print information about the extracted image
+                    st.write(f"Extracted image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
+                    st.write(f"Image OCR text: {image_text[:100]}...")
+                    st.write(f"Nearby text: {nearby_text[:100]}...")
+                    st.write(f"Sample of encoded image data: {img_str[:100]}")
 
             doc.close()
 
@@ -218,31 +223,73 @@ def vectorize_pdfs():
 # Function to perform semantic search in Qdrant
 def semantic_search(query, top_k=5):
     query_vector = model.encode(query).tolist()
-    search_result = qdrant_client.search(
+    
+    # Search for text results
+    text_results = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_vector,
-        limit=top_k
+        limit=top_k,
+        query_filter=Filter(
+            must=[
+                FieldCondition(
+                    key="type",
+                    match=MatchValue(value="text")
+                )
+            ]
+        )
     )
-    st.write(f"Semantic search returned {len(search_result)} results.")
+
+    # Search for image results based on text results
+    image_results = []
+    for text_result in text_results:
+        page_images = qdrant_client.search(
+            collection_name="manual_vectors",
+            query_vector=query_vector,
+            limit=2,  # Limit to 2 images per text result
+            query_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="type",
+                        match=MatchValue(value="image")
+                    ),
+                    FieldCondition(
+                        key="page",
+                        match=MatchValue(value=text_result.payload["page"])
+                    ),
+                    FieldCondition(
+                        key="file_name",
+                        match=MatchValue(value=text_result.payload["file_name"])
+                    )
+                ]
+            )
+        )
+        image_results.extend(page_images)
+
+    # Combine and deduplicate results
+    all_results = text_results + image_results
+    unique_results = list({r.id: r for r in all_results}.values())
+
+    st.write(f"Semantic search returned {len(unique_results)} results ({len(text_results)} text, {len(image_results)} images).")
     st.write(f"Query: {query}")
     st.write("Search results:")
-    for i, result in enumerate(search_result):
+    for i, result in enumerate(unique_results):
         st.write(f"Result {i + 1}: {result.payload['type']} from file {result.payload['file_name']}, Page {result.payload['page']}")
         st.write(f"Content: {result.payload['content'][:100]}...")
         st.write(f"Score: {result.score}")
-    return search_result
+
+    return unique_results
 
 # Function to generate response using OpenAI
 def generate_response(query, context, images):
-    image_descriptions = [f"Image on page {img.payload['page']}: {img.payload['content']}" for img in images if img.payload['type'] == 'image']
+    image_descriptions = [f"Image on page {img.payload['page']} of {img.payload['file_name']}: {img.payload['content']}" for img in images if img.payload['type'] == 'image']
     image_context = "\n".join(image_descriptions)
 
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures."},
-                {"role": "user", "content": f"Context: {context}\n\nImage Context: {image_context}\n\nQuestion: {query}"}
+                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures. When relevant, refer to the images provided in the context."},
+                {"role": "user", "content": f"Context:\n{context}\n\nImage Context:\n{image_context}\n\nQuestion: {query}"}
             ]
         )
         return response.choices[0].message['content']
@@ -268,18 +315,18 @@ if user_query:
     search_results = semantic_search(user_query)
     
     # Prepare context for OpenAI
-    context = "\n".join([result.payload['content'] for result in search_results])
+    text_context = "\n".join([result.payload['content'] for result in search_results if result.payload['type'] == 'text'])
+    image_results = [result for result in search_results if result.payload['type'] == 'image']
     
     # Generate response
-    response = generate_response(user_query, context, search_results)
+    response = generate_response(user_query, text_context, image_results)
     
     if response:
         st.write("Response:")
         st.write(response)
         
-        # Display associated images (with debugging)
+        # Display associated images
         st.write("Associated Images:")
-        image_results = [result for result in search_results if result.payload['type'] == 'image']
         st.write(f"Number of image results: {len(image_results)}")
 
         if len(image_results) == 0:
@@ -310,4 +357,40 @@ st.sidebar.markdown("""
 2. Click the "Vectorize PDFs" button to vectorize all the available PDFs (if not done already).
 3. Enter your query about maintenance or overhaul procedures in the chat interface.
 4. The system will provide a detailed response along with associated images.
+5. Review the response and any associated images for comprehensive information.
+
+## Troubleshooting:
+If you're not seeing images in the results:
+- Ensure that the PDFs contain images.
+- Check the vectorization output for any errors during image extraction.
+- Verify that the semantic search is finding relevant image results.
+
+For any persistent issues, please contact the system administrator.
 """)
+
+# Add a debug section
+if st.checkbox("Show Debug Information"):
+    st.subheader("Debug Information")
+    st.write("Qdrant Collection Info:")
+    try:
+        collection_info = qdrant_client.get_collection("manual_vectors")
+        st.json(collection_info.dict())
+    except Exception as e:
+        st.error(f"Failed to retrieve collection info: {str(e)}")
+
+    st.write("Sample Vectors:")
+    try:
+        sample_vectors = qdrant_client.scroll(
+            collection_name="manual_vectors",
+            limit=5,
+            with_payload=True,
+            with_vectors=False
+        )
+        st.json([point.dict() for point in sample_vectors[0]])
+    except Exception as e:
+        st.error(f"Failed to retrieve sample vectors: {str(e)}")
+
+# Main execution
+if __name__ == "__main__":
+    st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
+    main()
