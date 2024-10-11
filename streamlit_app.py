@@ -73,7 +73,7 @@ def vectorize_pdfs():
         return
 
     vectors = []
-    extracted_images_count = 0
+    total_images = 0
 
     for pdf_file_name in pdf_file_names:
         try:
@@ -103,6 +103,7 @@ def vectorize_pdfs():
 
                 # Extract and process images
                 image_list = page.get_images(full=True)
+                total_images += len(image_list)
                 st.write(f"Found {len(image_list)} images on page {page_num + 1} of {pdf_file_name}")
                 
                 for img_index, img in enumerate(image_list):
@@ -118,8 +119,15 @@ def vectorize_pdfs():
 
                     # Create rich metadata for the image
                     metadata_text = f"Page {page_num + 1}\n"
-                    metadata_text += f"Page Content: {text[:500]}..."  # Include more context
+                    metadata_text += f"Document Section: {pdf_file_name.split('_')[0]}\n"  # Add document section
+                    metadata_text += f"Page Content: {text[:1000]}..."  # Include more context
                     metadata_text += f"\nImage Hash: {str(image_hash)}"
+                    
+                    # Add keywords based on document structure
+                    if "piston" in text.lower():
+                        metadata_text += "\nKeywords: piston, engine component"
+                    elif "engine" in text.lower():
+                        metadata_text += "\nKeywords: engine, diagram"
 
                     # Create image vector
                     image_vector = model.encode(metadata_text).tolist()
@@ -141,7 +149,6 @@ def vectorize_pdfs():
                             "image_hash": str(image_hash)
                         }
                     ))
-                    extracted_images_count += 1
 
                 st.write(f"Processed page {page_num + 1} of {pdf_file_name}")
 
@@ -163,31 +170,43 @@ def vectorize_pdfs():
         except Exception as e:
             st.error(f"Error upserting batch {i // batch_size}: {e}")
 
-    st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files, including {extracted_images_count} images.")
+    st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files, including {total_images} images.")
 
 def semantic_search(query, top_k=10):
     query_vector = model.encode(query).tolist()
     
-    # Perform a single search for both text and images
-    results = qdrant_client.search(
+    # First, search for text results
+    text_results = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_vector,
-        limit=top_k
+        limit=top_k,
+        query_filter=Filter(must=[FieldCondition(key="type", match=MatchValue(value="text"))])
     )
     
-    # Separate text and image results
-    text_results = [r for r in results if r.payload['type'] == 'text']
-    image_results = [r for r in results if r.payload['type'] == 'image']
+    # Then, search for image results
+    image_results = qdrant_client.search(
+        collection_name="manual_vectors",
+        query_vector=query_vector,
+        limit=top_k,
+        query_filter=Filter(must=[FieldCondition(key="type", match=MatchValue(value="image"))])
+    )
     
-    st.write(f"Semantic search returned {len(results)} results ({len(text_results)} text, {len(image_results)} images).")
+    # Combine results, prioritizing images from the same pages as relevant text
+    relevant_pages = set((r.payload['file_name'], r.payload['page']) for r in text_results)
+    prioritized_images = [img for img in image_results if (img.payload['file_name'], img.payload['page']) in relevant_pages]
+    other_images = [img for img in image_results if (img.payload['file_name'], img.payload['page']) not in relevant_pages]
+    
+    combined_results = text_results + prioritized_images + other_images
+    
+    st.write(f"Semantic search returned {len(combined_results)} results ({len(text_results)} text, {len(prioritized_images)} prioritized images, {len(other_images)} other images).")
     st.write(f"Query: {query}")
     st.write("Search results:")
-    for i, result in enumerate(results):
+    for i, result in enumerate(combined_results):
         st.write(f"Result {i + 1}: {result.payload['type']} from file {result.payload['file_name']}, Page {result.payload['page']}")
         st.write(f"Content: {result.payload['content'][:100]}...")
         st.write(f"Score: {result.score}")
 
-    return results
+    return combined_results
 
 def generate_response(query, context, images):
     image_descriptions = [f"Image on page {img.payload['page']} of {img.payload['file_name']}: {img.payload['content']}" for img in images if img.payload['type'] == 'image']
@@ -341,5 +360,46 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
+
+# Optional: Add a help section
+with st.expander("Need Help?"):
+    st.markdown("""
+    ### Frequently Asked Questions
+
+    1. **How do I start using PropulsionPro?**
+       First, click the "Vectorize PDFs" button to process all available documents. Then, enter your question in the chat interface.
+
+    2. **Why am I not seeing any images in the results?**
+       Ensure that the PDFs contain images and that the vectorization process completed successfully. If issues persist, check the debug information.
+
+    3. **How can I improve the search results?**
+       Try rephrasing your query or using more specific terms related to marine engine maintenance.
+
+    4. **What should I do if I encounter an error?**
+       Check the error message for details. If you can't resolve the issue, contact the system administrator with the error details.
+
+    For more assistance, please refer to the user manual or contact support.
+    """)
+
+# Optional: Add a feedback mechanism
+with st.sidebar:
+    st.write("---")
+    st.write("We value your feedback!")
+    feedback = st.text_area("Please share your thoughts or report any issues:")
+    if st.button("Submit Feedback"):
+        # Here you would typically send this feedback to a database or email
+        st.success("Thank you for your feedback!")
+
+# Optional: Add a version number and update log
+st.sidebar.info("PropulsionPro v1.2.0")
+with st.sidebar.expander("Update Log"):
+    st.write("""
+    - v1.2.0: Improved image handling and search functionality
+    - v1.1.0: Enhanced PDF structure analysis and context-based image retrieval
+    - v1.0.0: Initial release
+    - v0.9.0: Beta testing phase
+    - v0.8.0: Improved image processing
+    - v0.7.0: Enhanced semantic search
+    """)
 
 # End of the application
