@@ -102,6 +102,7 @@ def vectorize_pdfs():
         return
 
     vectors = []
+    extracted_images_count = 0
 
     # Process each PDF file
     for pdf_file_name in pdf_file_names:
@@ -182,6 +183,7 @@ def vectorize_pdfs():
                             "image_data": img_str
                         }
                     ))
+                    extracted_images_count += 1
 
             doc.close()
 
@@ -202,7 +204,7 @@ def vectorize_pdfs():
         except Exception as e:
             st.error(f"Error upserting batch {i // batch_size}: {e}")
 
-    st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
+    st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files, including {extracted_images_count} images.")
 
 # Function to perform semantic search in Qdrant
 def semantic_search(query, top_k=5):
@@ -267,6 +269,7 @@ if user_query:
                 if image_data:
                     try:
                         image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+                        image = image.convert("RGB")  # Convert to RGB to ensure compatibility
                         st.image(image, caption=f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
                     except Exception as e:
                         st.warning(f"Failed to decode image data for {result.payload['file_name']}, Page {result.payload['page']}: {e}")
