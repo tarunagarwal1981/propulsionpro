@@ -112,8 +112,10 @@ def vectorize_pdfs():
                     image_bytes = base_image["image"]
                     image = Image.open(io.BytesIO(image_bytes))
 
+                    # Use a more robust hashing method
+                    image_hash = imagehash.average_hash(image)
+                    
                     # Skip reference header image
-                    image_hash = imagehash.phash(image)
                     if image_hash == reference_image_hash:
                         continue
 
@@ -136,6 +138,11 @@ def vectorize_pdfs():
                     buffered = io.BytesIO()
                     image.save(buffered, format="PNG")
                     img_str = base64.b64encode(buffered.getvalue()).decode()
+
+                    # Add a check for minimum image size
+                    if len(img_str) < 1000:  # Adjust this threshold as needed
+                        st.warning(f"Skipping small image on page {page_num + 1} of {pdf_file_name}")
+                        continue
 
                     vectors.append(PointStruct(
                         id=str(uuid.uuid4()),
@@ -232,7 +239,8 @@ def display_image(image_data, caption):
         st.image(image, caption=caption, use_column_width=True)
     except Exception as e:
         st.warning(f"Failed to display image: {str(e)}")
-        st.write(f"Image data (first 100 chars): {image_data[:100]}")
+        st.write(f"Image data length: {len(image_data)}")
+        st.write(f"First 100 chars of image data: {image_data[:100]}")
 
 # Main function
 def main():
@@ -333,7 +341,7 @@ qdrant_client = QdrantClient(
 reference_image_path = "assets/header_image.png"
 try:
     reference_image = Image.open(reference_image_path)
-    reference_image_hash = imagehash.phash(reference_image)
+    reference_image_hash = imagehash.average_hash(reference_image)
 except FileNotFoundError:
     st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
     reference_image_hash = None
@@ -395,9 +403,10 @@ with st.sidebar:
         st.success("Thank you for your feedback!")
 
 # Optional: Add a version number and update log
-st.sidebar.info("PropulsionPro v1.2.0")
+st.sidebar.info("PropulsionPro v1.3.0")
 with st.sidebar.expander("Update Log"):
     st.write("""
+    - v1.3.0: Enhanced image processing and display
     - v1.2.0: Improved image handling and search functionality
     - v1.1.0: Enhanced PDF structure analysis and context-based image retrieval
     - v1.0.0: Initial release
