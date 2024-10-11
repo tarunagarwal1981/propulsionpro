@@ -57,6 +57,19 @@ def recreate_qdrant_collection():
         )
     )
 
+def extract_structure(page):
+    """Extract structural information from a page."""
+    blocks = page.get_text("dict")["blocks"]
+    headings = []
+    paragraphs = []
+    for block in blocks:
+        if block["type"] == 0:  # Text block
+            if any(line["size"] > 12 for line in block["lines"]):  # Assuming headings are larger
+                headings.append(" ".join(span["text"] for line in block["lines"] for span in line["spans"]))
+            else:
+                paragraphs.append(" ".join(span["text"] for line in block["lines"] for span in line["spans"]))
+    return headings, paragraphs
+
 def vectorize_pdfs():
     if not minio_client:
         st.error("MinIO client not initialized.")
@@ -83,33 +96,23 @@ def vectorize_pdfs():
             doc = fitz.open(stream=pdf_content, filetype="pdf")
 
             for page_num, page in enumerate(doc):
-                # Extract all text from the page
-                full_page_text = page.get_text()
-                sentences = re.split(r'(?<=[.!?])\s+', full_page_text)
+                headings, paragraphs = extract_structure(page)
                 
-                # Extract page heading (assuming it's the first line of text)
-                page_heading = sentences[0] if sentences else ""
-                
-                # Truncate full page text if it's too long
-                max_text_length = 1000  # Adjust this value as needed
-                truncated_page_text = full_page_text[:max_text_length]
-
-                # Vectorize text chunks
-                for sentence in sentences:
-                    if len(sentence.strip()) > 0:
-                        embedding = model.encode(sentence.strip()).tolist()
-                        point_id = str(uuid.uuid4())
-                        vectors.append(PointStruct(
-                            id=point_id,
-                            vector=embedding,
-                            payload={
-                                "type": "text",
-                                "page": page_num + 1,
-                                "content": sentence.strip(),
-                                "file_name": pdf_file_name,
-                                "page_heading": page_heading
-                            }
-                        ))
+                # Vectorize text content
+                for text in headings + paragraphs:
+                    embedding = model.encode(text).tolist()
+                    point_id = str(uuid.uuid4())
+                    vectors.append(PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload={
+                            "type": "text",
+                            "page": page_num + 1,
+                            "content": text,
+                            "file_name": pdf_file_name,
+                            "is_heading": text in headings
+                        }
+                    ))
 
                 # Extract and vectorize images
                 image_list = page.get_images(full=True)
@@ -121,24 +124,24 @@ def vectorize_pdfs():
                     image_bytes = base_image["image"]
                     image = Image.open(io.BytesIO(image_bytes))
 
-                    # Skip reference header image
                     image_hash = imagehash.phash(image)
                     if image_hash == reference_image_hash:
                         continue
 
-                    # Attempt OCR, but don't rely solely on it
                     try:
                         image_text = pytesseract.image_to_string(image)
                     except Exception:
                         image_text = "OCR failed for this image"
 
-                    # Create metadata using page text and heading
-                    metadata_text = f"Page {page_num + 1} - {page_heading}\n\nPage Content: {truncated_page_text}\n\nImage OCR text: {image_text}"
+                    # Create metadata using page content and structure
+                    metadata_text = f"Page {page_num + 1}\n"
+                    metadata_text += f"Headings: {'; '.join(headings)}\n"
+                    metadata_text += f"Image OCR text: {image_text}\n"
+                    metadata_text += f"Page content: {' '.join(paragraphs)[:500]}..."  # Truncate to avoid overly long metadata
                     
                     embedding = model.encode(metadata_text).tolist()
                     point_id = str(uuid.uuid4())
 
-                    # Convert image to base64 for storage
                     buffered = io.BytesIO()
                     image.save(buffered, format="PNG")
                     img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -153,14 +156,12 @@ def vectorize_pdfs():
                             "file_name": pdf_file_name,
                             "image_index": img_index,
                             "image_data": img_str,
-                            "page_heading": page_heading
                         }
                     ))
                     extracted_images_count += 1
 
                     st.write(f"Extracted image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
                     st.write(f"Image metadata: {metadata_text[:100]}...")
-                    st.write(f"Sample of encoded image data: {img_str[:100]}")
 
             doc.close()
 
@@ -185,6 +186,7 @@ def vectorize_pdfs():
 def semantic_search(query, top_k=5):
     query_vector = model.encode(query).tolist()
     
+    # Stage 1: Search for relevant text
     text_results = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_vector,
@@ -199,12 +201,13 @@ def semantic_search(query, top_k=5):
         )
     )
 
+    # Stage 2: Retrieve context-based images
     image_results = []
     for text_result in text_results:
         page_images = qdrant_client.search(
             collection_name="manual_vectors",
             query_vector=query_vector,
-            limit=2,
+            limit=2,  # Limit to 2 images per text result
             query_filter=Filter(
                 must=[
                     FieldCondition(
@@ -224,6 +227,7 @@ def semantic_search(query, top_k=5):
         )
         image_results.extend(page_images)
 
+    # Combine and deduplicate results
     all_results = text_results + image_results
     unique_results = list({r.id: r for r in all_results}.values())
 
@@ -362,7 +366,6 @@ except FileNotFoundError:
     st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
     reference_image_hash = None
 
-
 # Run the main function
 if __name__ == "__main__":
     main()
@@ -420,9 +423,10 @@ with st.sidebar:
         st.success("Thank you for your feedback!")
 
 # Optional: Add a version number and update log
-st.sidebar.info("PropulsionPro v1.0.0")
+st.sidebar.info("PropulsionPro v1.1.0")
 with st.sidebar.expander("Update Log"):
     st.write("""
+    - v1.1.0: Improved PDF structure analysis and context-based image retrieval
     - v1.0.0: Initial release
     - v0.9.0: Beta testing phase
     - v0.8.0: Improved image processing
