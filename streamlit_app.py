@@ -83,10 +83,18 @@ def vectorize_pdfs():
             doc = fitz.open(stream=pdf_content, filetype="pdf")
 
             for page_num, page in enumerate(doc):
-                text = page.get_text()
-                sentences = re.split(r'(?<=[.!?])\s+', text)
+                # Extract all text from the page
+                full_page_text = page.get_text()
+                sentences = re.split(r'(?<=[.!?])\s+', full_page_text)
+                
+                # Extract page heading (assuming it's the first line of text)
                 page_heading = sentences[0] if sentences else ""
+                
+                # Truncate full page text if it's too long
+                max_text_length = 1000  # Adjust this value as needed
+                truncated_page_text = full_page_text[:max_text_length]
 
+                # Vectorize text chunks
                 for sentence in sentences:
                     if len(sentence.strip()) > 0:
                         embedding = model.encode(sentence.strip()).tolist()
@@ -103,6 +111,7 @@ def vectorize_pdfs():
                             }
                         ))
 
+                # Extract and vectorize images
                 image_list = page.get_images(full=True)
                 st.write(f"Found {len(image_list)} images on page {page_num + 1} of {pdf_file_name}")
                 
@@ -112,26 +121,24 @@ def vectorize_pdfs():
                     image_bytes = base_image["image"]
                     image = Image.open(io.BytesIO(image_bytes))
 
+                    # Skip reference header image
                     image_hash = imagehash.phash(image)
                     if image_hash == reference_image_hash:
                         continue
 
+                    # Attempt OCR, but don't rely solely on it
                     try:
                         image_text = pytesseract.image_to_string(image)
                     except Exception:
                         image_text = "OCR failed for this image"
 
-                    bbox = img[1]
-                    try:
-                        extended_rect = fitz.Rect(bbox).expand(100)
-                        nearby_text = page.get_text("text", clip=extended_rect)
-                    except Exception:
-                        nearby_text = "No nearby text found"
-
-                    metadata_text = f"Page {page_num + 1} - {page_heading}\nImage OCR text: {image_text}\nNearby text: {nearby_text}"
+                    # Create metadata using page text and heading
+                    metadata_text = f"Page {page_num + 1} - {page_heading}\n\nPage Content: {truncated_page_text}\n\nImage OCR text: {image_text}"
+                    
                     embedding = model.encode(metadata_text).tolist()
                     point_id = str(uuid.uuid4())
 
+                    # Convert image to base64 for storage
                     buffered = io.BytesIO()
                     image.save(buffered, format="PNG")
                     img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -152,8 +159,7 @@ def vectorize_pdfs():
                     extracted_images_count += 1
 
                     st.write(f"Extracted image {img_index + 1} from page {page_num + 1} of {pdf_file_name}")
-                    st.write(f"Image OCR text: {image_text[:100]}...")
-                    st.write(f"Nearby text: {nearby_text[:100]}...")
+                    st.write(f"Image metadata: {metadata_text[:100]}...")
                     st.write(f"Sample of encoded image data: {img_str[:100]}")
 
             doc.close()
@@ -309,7 +315,7 @@ def main():
     If you're not seeing images in the results:
     - Ensure that the PDFs contain images.
     - Check the vectorization output for any errors during image extraction.
-    - Verify that the semantic search is finding relevant image results.
+    - Verify that the semantic search is finding relevant images for the query.
 
     For any persistent issues, please contact the system administrator.
     """)
@@ -357,5 +363,3 @@ except FileNotFoundError:
     reference_image_hash = None
 
 # Run the main function
-if __name__ == "__main__":
-    main()
