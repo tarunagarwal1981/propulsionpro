@@ -44,6 +44,16 @@ def initialize_minio():
         st.error(f"MinIO initialization failed: Missing secret key {e}")
         return None
 
+def initialize_qdrant():
+    try:
+        return QdrantClient(
+            url=st.secrets["qdrant"]["url"],
+            api_key=st.secrets["qdrant"]["api_key"]
+        )
+    except KeyError as e:
+        st.error(f"Qdrant initialization failed: Missing secret key {e}")
+        return None
+
 def recreate_qdrant_collection():
     try:
         qdrant_client.delete_collection(collection_name="manual_vectors")
@@ -187,6 +197,10 @@ def semantic_search(query, top_k=10):
         st.error("Model is not loaded. Please load the model before proceeding.")
         return []
     
+    if qdrant_client is None:
+        st.error("Qdrant client is not initialized. Please initialize the Qdrant client before proceeding.")
+        return []
+    
     query_vector = model.encode(query).tolist()
     
     # First, search for text results
@@ -254,6 +268,8 @@ st.title('PropulsionPro: Vectorization and Query System')
 
 # Load the model before any operations
 model = load_model()
+minio_client = initialize_minio()
+qdrant_client = initialize_qdrant()
 
 if st.button("Vectorize PDFs"):
     with st.spinner("Vectorizing all PDFs from Cloudflare R2 and saving in Qdrant..."):
