@@ -14,6 +14,7 @@ import openai
 import base64
 from spire.pdf import *
 from spire.pdf.common import *
+from System import *
 
 # Set page config at the very beginning
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
