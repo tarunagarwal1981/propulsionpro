@@ -183,6 +183,10 @@ def vectorize_pdfs():
     st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files, including {total_images} images.")
 
 def semantic_search(query, top_k=10):
+    if model is None:
+        st.error("Model is not loaded. Please load the model before proceeding.")
+        return []
+    
     query_vector = model.encode(query).tolist()
     
     # First, search for text results
@@ -247,6 +251,9 @@ def display_image(image_data, caption):
 
 # Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
+
+# Load the model before any operations
+model = load_model()
 
 if st.button("Vectorize PDFs"):
     with st.spinner("Vectorizing all PDFs from Cloudflare R2 and saving in Qdrant..."):
