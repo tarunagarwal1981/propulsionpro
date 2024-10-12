@@ -13,6 +13,8 @@ import os
 import openai
 import base64
 import fitz  # PyMuPDF for PDF handling
+from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
 
 # Set page config at the very beginning
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
@@ -180,26 +182,68 @@ def vectorize_pdfs():
 
     st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files, including {total_images} images.")
 
-# Initialization
-try:
-    openai.api_key = get_api_key()
-except ValueError as e:
-    st.error(str(e))
+def semantic_search(query, top_k=10):
+    query_vector = model.encode(query).tolist()
+    
+    # First, search for text results
+    text_results = qdrant_client.search(
+        collection_name="manual_vectors",
+        query_vector=query_vector,
+        limit=top_k,
+        query_filter=Filter(must=[FieldCondition(key="type", match=MatchValue(value="text"))])
+    )
+    
+    # Then, search for image results
+    image_results = qdrant_client.search(
+        collection_name="manual_vectors",
+        query_vector=query_vector,
+        limit=top_k,
+        query_filter=Filter(must=[FieldCondition(key="type", match=MatchValue(value="image"))])
+    )
+    
+    # Combine results, prioritizing images from the same pages as relevant text
+    relevant_pages = set((r.payload['file_name'], r.payload['page']) for r in text_results)
+    prioritized_images = [img for img in image_results if (img.payload['file_name'], img.payload['page']) in relevant_pages]
+    other_images = [img for img in image_results if (img.payload['file_name'], img.payload['page']) not in relevant_pages]
+    
+    combined_results = text_results + prioritized_images + other_images
+    
+    st.write(f"Semantic search returned {len(combined_results)} results ({len(text_results)} text, {len(prioritized_images)} prioritized images, {len(other_images)} other images).")
+    st.write(f"Query: {query}")
+    st.write("Search results:")
+    for i, result in enumerate(combined_results):
+        st.write(f"Result {i + 1}: {result.payload['type']} from file {result.payload['file_name']}, Page {result.payload['page']}")
+        st.write(f"Content: {result.payload['content'][:100]}...")
+        st.write(f"Score: {result.score}")
 
-model = load_model()
-minio_client = initialize_minio()
-qdrant_client = QdrantClient(
-    url=st.secrets["qdrant"]["url"],
-    api_key=st.secrets["qdrant"]["api_key"]
-)
+    return combined_results
 
-reference_image_path = "assets/header_image.png"
-try:
-    reference_image = Image.open(reference_image_path)
-    reference_image_hash = imagehash.average_hash(reference_image)
-except FileNotFoundError:
-    st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
-    reference_image_hash = None
+def generate_response(query, context, images):
+    image_descriptions = [f"Image on page {img.payload['page']} of {img.payload['file_name']}: {img.payload['content']}" for img in images if img.payload['type'] == 'image']
+    image_context = "\n".join(image_descriptions)
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures. When relevant, refer to the images provided in the context."},
+                {"role": "user", "content": f"Context:\n{context}\n\nImage Context:\n{image_context}\n\nQuestion: {query}"}
+            ]
+        )
+        return response.choices[0].message['content']
+    except Exception as e:
+        st.error(f"OpenAI API call failed: {e}")
+        return ""
+
+def display_image(image_data, caption):
+    try:
+        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+        image = image.convert("RGB")
+        st.image(image, caption=caption, use_column_width=True)
+    except Exception as e:
+        st.warning(f"Failed to display image: {str(e)}")
+        st.write(f"Image data length: {len(image_data)}")
+        st.write(f"First 100 chars of image data: {image_data[:100]}")
 
 # Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
@@ -208,6 +252,31 @@ if st.button("Vectorize PDFs"):
     with st.spinner("Vectorizing all PDFs from Cloudflare R2 and saving in Qdrant..."):
         vectorize_pdfs()
         st.success("All PDFs have been successfully vectorized and saved in Qdrant!")
+
+st.subheader("Chat with PropulsionPro")
+user_query = st.text_input("Enter your query about maintenance or overhaul procedures:")
+
+if user_query:
+    search_results = semantic_search(user_query)
+    
+    text_context = "\n".join([result.payload['content'] for result in search_results if result.payload['type'] == 'text'])
+    image_results = [result for result in search_results if result.payload['type'] == 'image']
+    
+    response = generate_response(user_query, text_context, image_results)
+    
+    if response:
+        st.write("Response:")
+        st.write(response)
+        
+        st.write("Associated Images:")
+        for i, result in enumerate(image_results):
+            image_data = result.payload.get('image_data')
+            st.write(f"Image {i+1} from {result.payload['file_name']}, Page {result.payload['page']}")
+            if image_data:
+                display_image(image_data, f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+            else:
+                st.write("Image data not found.")
+            st.write("---")
 
 st.sidebar.markdown("""
 ## How to use the system:
