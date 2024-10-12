@@ -1,5 +1,4 @@
 import streamlit as st
-import fitz  # PyMuPDF for PDF extraction
 import io
 from minio import Minio
 from minio.error import S3Error
@@ -13,6 +12,8 @@ import uuid
 import os
 import openai
 import base64
+from spire.pdf import *
+from spire.pdf.common import *
 
 # Set page config at the very beginning
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
@@ -79,13 +80,16 @@ def vectorize_pdfs():
         try:
             response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
             pdf_content = response.read()
-            doc = fitz.open(stream=pdf_content, filetype="pdf")
+            
+            # Load PDF using Spire.PDF
+            doc = PdfDocument()
+            doc.LoadFromBytes(pdf_content)
 
-            for page_num in range(len(doc)):
-                page = doc[page_num]
+            for page_num in range(doc.Pages.Count):
+                page = doc.Pages[page_num]
                 
                 # Extract and process text
-                text = page.get_text()
+                text = page.ExtractText()
                 sentences = re.split(r'(?<=[.!?])\s+', text)
                 for sentence in sentences:
                     if len(sentence.strip()) > 0:
@@ -101,15 +105,13 @@ def vectorize_pdfs():
                             }
                         ))
 
-                # Extract and process images
-                image_list = page.get_images(full=True)
-                total_images += len(image_list)
-                st.write(f"Found {len(image_list)} images on page {page_num + 1} of {pdf_file_name}")
+                # Extract and process images using Spire.PDF
+                images = page.ExtractImages()
+                total_images += len(images)
+                st.write(f"Found {len(images)} images on page {page_num + 1} of {pdf_file_name}")
                 
-                for img_index, img in enumerate(image_list):
-                    xref = img[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
+                for img_index, img in enumerate(images):
+                    image_bytes = img.Bytes
                     image = Image.open(io.BytesIO(image_bytes))
 
                     # Use a more robust hashing method
@@ -121,8 +123,8 @@ def vectorize_pdfs():
 
                     # Create rich metadata for the image
                     metadata_text = f"Page {page_num + 1}\n"
-                    metadata_text += f"Document Section: {pdf_file_name.split('_')[0]}\n"  # Add document section
-                    metadata_text += f"Page Content: {text[:1000]}..."  # Include more context
+                    metadata_text += f"Document Section: {pdf_file_name.split('_')[0]}\n"
+                    metadata_text += f"Page Content: {text[:1000]}..."
                     metadata_text += f"\nImage Hash: {str(image_hash)}"
                     
                     # Add keywords based on document structure
@@ -159,7 +161,7 @@ def vectorize_pdfs():
 
                 st.write(f"Processed page {page_num + 1} of {pdf_file_name}")
 
-            doc.close()
+            doc.Close()
 
         except S3Error as e:
             st.error(f"Error downloading file {pdf_file_name} from Cloudflare R2: {e}")
@@ -403,9 +405,10 @@ with st.sidebar:
         st.success("Thank you for your feedback!")
 
 # Optional: Add a version number and update log
-st.sidebar.info("PropulsionPro v1.3.0")
+st.sidebar.info("PropulsionPro v1.4.0")
 with st.sidebar.expander("Update Log"):
     st.write("""
+    - v1.4.0: Integrated Spire.PDF for improved image extraction
     - v1.3.0: Enhanced image processing and display
     - v1.2.0: Improved image handling and search functionality
     - v1.1.0: Enhanced PDF structure analysis and context-based image retrieval
