@@ -83,7 +83,8 @@ def vectorize_pdfs():
             
             # Load PDF using Spire.PDF
             doc = PdfDocument()
-            doc.LoadFromBytes(pdf_content)
+            memory_stream = MemoryStream(pdf_content)
+            doc.LoadFromStream(memory_stream)
 
             for page_num in range(doc.Pages.Count):
                 page = doc.Pages[page_num]
@@ -111,7 +112,7 @@ def vectorize_pdfs():
                 st.write(f"Found {len(images)} images on page {page_num + 1} of {pdf_file_name}")
                 
                 for img_index, img in enumerate(images):
-                    image_bytes = img.Bytes
+                    image_bytes = img.Image.GetImageData()
                     image = Image.open(io.BytesIO(image_bytes))
 
                     # Use a more robust hashing method
@@ -167,7 +168,6 @@ def vectorize_pdfs():
             st.error(f"Error downloading file {pdf_file_name} from Cloudflare R2: {e}")
         except Exception as e:
             st.error(f"Error processing file {pdf_file_name}: {str(e)}")
-
     recreate_qdrant_collection()
 
     batch_size = 100
