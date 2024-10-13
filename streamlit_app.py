@@ -261,11 +261,22 @@ def generate_response(query, context, images):
 
 def display_image(image_data, caption):
     try:
-        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+        st.write(f"Attempting to display image: {caption}")
+        st.write(f"Image data length: {len(image_data)}")
+        st.write(f"First 100 chars of image data: {image_data[:100]}")
+        
+        decoded_image = base64.b64decode(image_data)
+        st.write(f"Decoded image data length: {len(decoded_image)}")
+        
+        image = Image.open(io.BytesIO(decoded_image))
+        st.write(f"Image size: {image.size}")
+        st.write(f"Image mode: {image.mode}")
+        
         image = image.convert("RGB")
         st.image(image, caption=caption, use_column_width=True)
+        st.write("Image displayed successfully")
     except Exception as e:
-        st.warning(f"Failed to display image: {str(e)}")
+        st.error(f"Failed to display image: {str(e)}")
         st.write(f"Image data length: {len(image_data)}")
         st.write(f"First 100 chars of image data: {image_data[:100]}")
 
