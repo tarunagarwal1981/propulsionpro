@@ -12,7 +12,7 @@ import os
 import openai
 import base64
 import fitz  # PyMuPDF
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoProcessor, AutoConfig
 import torch
 
 # Set page config
@@ -28,13 +28,8 @@ def get_api_key():
     return api_key
 
 @st.cache_resource
-def load_model():
+def load_sentence_transformer_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
-
-
-from transformers import AutoModelForCausalLM, AutoProcessor, AutoConfig
-
-from transformers import AutoModelForCausalLM, AutoProcessor, AutoConfig
 
 def load_phi3_model():
     model_id = "microsoft/Phi-3-vision-128k-instruct"
@@ -64,8 +59,6 @@ def load_phi3_model():
     )
 
     return model, processor
-
-
 
 def initialize_minio():
     try:
@@ -109,9 +102,7 @@ def extract_images_from_pdf(pdf_content):
     return images
 
 def process_with_phi3(model, processor, image, prompt):
-    prompt_template = "<|user|>\n{}<|end|>\n<|assistant|>\n".format(
-        "<|image_1|>\n" + prompt if image else prompt
-    )
+    prompt_template = f"<|user|>\n<|image_1|>\n{prompt}<|end|>\n<|assistant|>\n" if image else f"<|user|>\n{prompt}<|end|>\n<|assistant|>\n"
     inputs = processor(prompt_template, [image] if image else None, return_tensors="pt").to(model.device)
     
     with torch.no_grad():
@@ -278,7 +269,7 @@ try:
 except ValueError as e:
     st.error(str(e))
 
-model = load_model()
+model = load_sentence_transformer_model()
 minio_client = initialize_minio()
 qdrant_client = initialize_qdrant()
 
