@@ -5,15 +5,13 @@ from minio.error import S3Error
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, VectorParams, Filter, FieldCondition, MatchValue
-import re
+from qdrant_client.models import PointStruct, VectorParams
 import imagehash
 import uuid
 import os
 import openai
 import base64
 import fitz  # PyMuPDF
-import numpy as np
 from transformers import AutoModelForCausalLM, AutoProcessor
 import torch
 
@@ -37,11 +35,10 @@ def load_model():
 def load_phi3_model():
     model_id = "microsoft/Phi-3-vision-128k-instruct"
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, 
+        model_id,
         device_map="auto",
         torch_dtype="auto",
-        trust_remote_code=True,
-        _attn_implementation='flash_attention_2'
+        trust_remote_code=True
     ).to("cuda" if torch.cuda.is_available() else "cpu")
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     return model, processor
@@ -91,13 +88,9 @@ def process_with_phi3(model, processor, image, prompt):
     prompt_template = f"<|user|>\n{('<|image_1|>\n' if image else '')}{prompt}<|end|>\n<|assistant|>\n"
     inputs = processor(prompt_template, [image] if image else None, return_tensors="pt").to(model.device)
     
-    generation_args = {
-        "max_new_tokens": 500,
-        "temperature": 0.7,
-        "do_sample": False
-    }
+    with torch.no_grad():
+        output_ids = model.generate(**inputs, max_new_tokens=500, temperature=0.7, do_sample=False)
     
-    output_ids = model.generate(**inputs, **generation_args)
     output_ids = output_ids[:, inputs['input_ids'].shape[1]:]
     return processor.batch_decode(output_ids, skip_special_tokens=True)[0]
 
