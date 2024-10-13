@@ -273,7 +273,7 @@ def display_image(image_data, caption):
         st.write(f"Original Image mode: {image.mode}")
         
         # Create a white background
-        background = Image.new('RGBA', image.size, (255, 255, 255, 255))
+        background = Image.new('RGBA', image.size, (0,0,0,1))
         
         # Convert image to RGBA if it's not already
         if image.mode != 'RGBA':
