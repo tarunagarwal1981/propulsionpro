@@ -272,6 +272,10 @@ def display_image(image_data, caption):
         st.write(f"Image size: {image.size}")
         st.write(f"Image mode: {image.mode}")
         
+        # Save image to file for manual inspection
+        image.save(f"debug_image_{caption.replace(' ', '_')}.png")
+        st.write(f"Image saved to file: debug_image_{caption.replace(' ', '_')}.png")
+        
         image = image.convert("RGB")
         st.image(image, caption=caption, use_column_width=True)
         st.write("Image displayed successfully")
