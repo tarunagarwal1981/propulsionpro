@@ -307,7 +307,38 @@ def display_image(image_data, caption):
         st.error(f"Failed to display image: {str(e)}")
         st.write(f"Image data length: {len(image_data)}")
         st.write(f"First 100 chars of image data: {image_data[:100]}")
-        
+
+import streamlit as st
+from PIL import Image, ImageDraw
+import io
+import base64
+
+def create_test_image():
+    # Create a simple image with some visible content
+    img = Image.new('RGB', (200, 200), color = (73, 109, 137))
+    d = ImageDraw.Draw(img)
+    d.text((20,20), "Test Image", fill=(255,255,0))
+    return img
+
+def image_to_base64(img):
+    buffered = io.BytesIO()
+    img.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
+# Create and display test image
+test_img = create_test_image()
+st.image(test_img, caption="Test Image via st.image()")
+
+# Display test image via HTML
+img_base64 = image_to_base64(test_img)
+st.markdown(f'<img src="data:image/png;base64,{img_base64}" alt="Test Image via HTML">', unsafe_allow_html=True)
+
+# Display debug info
+st.write(f"Image size: {test_img.size}")
+st.write(f"Image mode: {test_img.mode}")
+st.write(f"Base64 data length: {len(img_base64)}")
+st.write(f"First 100 chars of base64 data: {img_base64[:100]}")
+
 # Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
 
