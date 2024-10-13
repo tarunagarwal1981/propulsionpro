@@ -269,16 +269,40 @@ def display_image(image_data, caption):
         st.write(f"Decoded image data length: {len(decoded_image)}")
         
         image = Image.open(io.BytesIO(decoded_image))
-        st.write(f"Image size: {image.size}")
-        st.write(f"Image mode: {image.mode}")
+        st.write(f"Original Image size: {image.size}")
+        st.write(f"Original Image mode: {image.mode}")
         
-        # Save image to file for manual inspection
-        image.save(f"debug_image_{caption.replace(' ', '_')}.png")
-        st.write(f"Image saved to file: debug_image_{caption.replace(' ', '_')}.png")
+        # Create a white background
+        background = Image.new('RGBA', image.size, (255, 255, 255, 255))
         
-        image = image.convert("RGB")
-        st.image(image, caption=caption, use_column_width=True)
+        # Convert image to RGBA if it's not already
+        if image.mode != 'RGBA':
+            image = image.convert('RGBA')
+        
+        # Composite the image onto the background
+        composite_image = Image.alpha_composite(background, image)
+        
+        st.write(f"Composite Image size: {composite_image.size}")
+        st.write(f"Composite Image mode: {composite_image.mode}")
+        
+        # Save composite image to file for manual inspection
+        composite_image.save(f"debug_composite_image_{caption.replace(' ', '_')}.png")
+        st.write(f"Composite image saved to file: debug_composite_image_{caption.replace(' ', '_')}.png")
+        
+        # Convert back to RGB for display
+        display_image = composite_image.convert("RGB")
+        
+        # Display the image
+        st.image(display_image, caption=caption, use_column_width=True)
         st.write("Image displayed successfully")
+        
+        # Also try displaying with markdown
+        buffered = io.BytesIO()
+        display_image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        st.markdown(f'<img src="data:image/png;base64,{img_str}" alt="{caption}">', unsafe_allow_html=True)
+        st.write("Image also displayed using markdown")
+        
     except Exception as e:
         st.error(f"Failed to display image: {str(e)}")
         st.write(f"Image data length: {len(image_data)}")
