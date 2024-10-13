@@ -272,8 +272,8 @@ def display_image(image_data, caption):
         st.write(f"Original Image size: {image.size}")
         st.write(f"Original Image mode: {image.mode}")
         
-        # Create a white background
-        background = Image.new('RGBA', image.size, (0,0,0,1))
+        # Create a dark background (dark gray in this case)
+        background = Image.new('RGBA', image.size, (32, 32, 32, 255))
         
         # Convert image to RGBA if it's not already
         if image.mode != 'RGBA':
@@ -300,14 +300,14 @@ def display_image(image_data, caption):
         buffered = io.BytesIO()
         display_image.save(buffered, format="PNG")
         img_str = base64.b64encode(buffered.getvalue()).decode()
-        st.markdown(f'<img src="data:image/png;base64,{img_str}" alt="{caption}">', unsafe_allow_html=True)
+        st.markdown(f'<img src="data:image/png;base64,{img_str}" alt="{caption}" style="background-color: #202020;">', unsafe_allow_html=True)
         st.write("Image also displayed using markdown")
         
     except Exception as e:
         st.error(f"Failed to display image: {str(e)}")
         st.write(f"Image data length: {len(image_data)}")
         st.write(f"First 100 chars of image data: {image_data[:100]}")
-
+        
 # Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
 
