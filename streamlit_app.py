@@ -31,17 +31,26 @@ def get_api_key():
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
+
 @st.cache_resource
 def load_phi3_model():
+    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+
     model_id = "microsoft/Phi-3-vision-128k-instruct"
+    
+    # Check if CUDA is available and choose the correct device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        device_map="auto",
-        torch_dtype="auto",
+        device_map="auto",  # Change device assignment as per your requirements
+        torch_dtype="auto", 
         trust_remote_code=True
-    ).to("cuda" if torch.cuda.is_available() else "cpu")
+    ).to(device)
+    
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     return model, processor
+
 
 def initialize_minio():
     try:
