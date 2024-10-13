@@ -39,27 +39,29 @@ from transformers import AutoModelForCausalLM, AutoProcessor, AutoConfig
 def load_phi3_model():
     model_id = "microsoft/Phi-3-vision-128k-instruct"
 
-    # Load the model configuration first
-    config = AutoConfig.from_pretrained(model_id)
+    # Load the model configuration with trust_remote_code explicitly set to True
+    config = AutoConfig.from_pretrained(
+        model_id,
+        trust_remote_code=True  # Explicitly allow custom code execution
+    )
     
-    # Disable FlashAttention2 in the model configuration if it exists
-    if hasattr(config, "_attn_implementation") and config._attn_implementation == "flash_attention_2":
-        config._attn_implementation = "default"  # Set to default attention
-
-    # Specify the device explicitly
+    # Specify the device explicitly to avoid GPU-related issues
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load the model with the modified configuration
+    # Load the model with the modified configuration and trust_remote_code enabled
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         config=config,
         device_map="auto",
         torch_dtype="auto",
-        trust_remote_code=True  # Necessary to allow custom code from the model repository
+        trust_remote_code=True  # Allow custom code from the model repository
     ).to(device)
-
+    
     # Load the processor
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(
+        model_id,
+        trust_remote_code=True  # Ensure processor also allows custom code
+    )
 
     return model, processor
 
