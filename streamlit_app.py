@@ -313,6 +313,21 @@ from PIL import Image, ImageDraw
 import io
 import base64
 
+
+
+def decode_and_save_image(base64_string, output_file):
+    try:
+        image_data = base64.b64decode(base64_string)
+        with open(output_file, "wb") as f:
+            f.write(image_data)
+        print(f"Image saved successfully to {output_file}")
+    except Exception as e:
+        print(f"Error decoding/saving image: {str(e)}")
+
+# Use this function with one of your base64 strings
+base64_string = "iVBORw0KGgoAAAANSUhEUgAAAdsAAAEDCAIAAADydTkhAAADqElEQVR4nO3UMQEAIAzAMMC/5/HggR6Jgl7dM7MACDi/AwB4HBmg..."  # Add the full base64 string here
+decode_and_save_image(base64_string, "decoded_image.png")
+
 def create_test_image():
     # Create a simple image with some visible content
     img = Image.new('RGB', (200, 200), color = (73, 109, 137))
