@@ -12,11 +12,10 @@ import uuid
 import os
 import openai
 import base64
-import fitz  # PyMuPDF for PDF handling
-from sklearn.metrics.pairwise import cosine_similarity
+import fitz  # PyMuPDF
 import numpy as np
 
-# Set page config at the very beginning
+# Set page config
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
 
 # Function definitions
@@ -27,12 +26,6 @@ def get_api_key():
     if api_key is None:
         raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
     return api_key
-
-# Set OpenAI API key
-try:
-    openai.api_key = get_api_key()
-except ValueError as e:
-    st.error(str(e))
 
 @st.cache_resource
 def load_model():
@@ -74,6 +67,25 @@ def recreate_qdrant_collection():
         )
     )
 
+def extract_images_from_pdf(pdf_content):
+    doc = fitz.open(stream=pdf_content, filetype="pdf")
+    images = []
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        image_list = page.get_images(full=True)
+        
+        for img_index, img in enumerate(image_list):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            
+            image = Image.open(io.BytesIO(image_bytes))
+            images.append((f"Page {page_num + 1}, Image {img_index + 1}", image))
+
+    doc.close()
+    return images
+
 def vectorize_pdfs():
     if not minio_client:
         st.error("MinIO client not initialized.")
@@ -98,13 +110,14 @@ def vectorize_pdfs():
             response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
             pdf_content = response.read()
             
-            # Load PDF using PyMuPDF (fitz)
-            doc = fitz.open(stream=pdf_content, filetype="pdf")
+            # Extract images using PyMuPDF
+            extracted_images = extract_images_from_pdf(pdf_content)
+            total_images += len(extracted_images)
 
+            # Process text (you may need to adjust this part based on your requirements)
+            doc = fitz.open(stream=pdf_content, filetype="pdf")
             for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                
-                # Extract and process text
+                page = doc[page_num]
                 text = page.get_text()
                 sentences = re.split(r'(?<=[.!?])\s+', text)
                 for sentence in sentences:
@@ -121,63 +134,39 @@ def vectorize_pdfs():
                             }
                         ))
 
-                # Extract and process images using PyMuPDF
-                image_list = page.get_images(full=True)
-                total_images += len(image_list)
-                st.write(f"Found {len(image_list)} images on page {page_num + 1} of {pdf_file_name}")
+            # Process images
+            for img_info, image in extracted_images:
+                image_hash = imagehash.average_hash(image)
                 
-                for img_index, img in enumerate(image_list):
-                    xref = img[0]
-                    base_image = doc.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    image = Image.open(io.BytesIO(image_bytes))
+                if image_hash == reference_image_hash:
+                    continue
 
-                    # Use a more robust hashing method
-                    image_hash = imagehash.average_hash(image)
-                    
-                    # Skip reference header image
-                    if image_hash == reference_image_hash:
-                        continue
+                metadata_text = f"{img_info}\n"
+                metadata_text += f"Document Section: {pdf_file_name.split('_')[0]}\n"
+                metadata_text += f"Image Hash: {str(image_hash)}"
 
-                    # Create rich metadata for the image
-                    metadata_text = f"Page {page_num + 1}\n"
-                    metadata_text += f"Document Section: {pdf_file_name.split('_')[0]}\n"
-                    metadata_text += f"Page Content: {text[:1000]}..."
-                    metadata_text += f"\nImage Hash: {str(image_hash)}"
-                    
-                    # Add keywords based on document structure
-                    if "piston" in text.lower():
-                        metadata_text += "\nKeywords: piston, engine component"
-                    elif "engine" in text.lower():
-                        metadata_text += "\nKeywords: engine, diagram"
+                image_vector = model.encode(metadata_text).tolist()
 
-                    # Create image vector
-                    image_vector = model.encode(metadata_text).tolist()
+                buffered = io.BytesIO()
+                image.save(buffered, format="PNG")
+                img_str = base64.b64encode(buffered.getvalue()).decode()
 
-                    # Store image data and vector
-                    buffered = io.BytesIO()
-                    image.save(buffered, format="PNG")
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                if len(img_str) < 1000:  # Adjust this threshold as needed
+                    st.warning(f"Skipping small image: {img_info} from {pdf_file_name}")
+                    continue
 
-                    # Add a check for minimum image size
-                    if len(img_str) < 1000:  # Adjust this threshold as needed
-                        st.warning(f"Skipping small image on page {page_num + 1} of {pdf_file_name}")
-                        continue
-
-                    vectors.append(PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector=image_vector,
-                        payload={
-                            "type": "image",
-                            "page": page_num + 1,
-                            "content": metadata_text,
-                            "file_name": pdf_file_name,
-                            "image_data": img_str,
-                            "image_hash": str(image_hash)
-                        }
-                    ))
-
-                st.write(f"Processed page {page_num + 1} of {pdf_file_name}")
+                vectors.append(PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=image_vector,
+                    payload={
+                        "type": "image",
+                        "page": int(img_info.split(',')[0].split()[-1]),
+                        "content": metadata_text,
+                        "file_name": pdf_file_name,
+                        "image_data": img_str,
+                        "image_hash": str(image_hash)
+                    }
+                ))
 
             doc.close()
 
@@ -185,6 +174,7 @@ def vectorize_pdfs():
             st.error(f"Error downloading file {pdf_file_name} from Cloudflare R2: {e}")
         except Exception as e:
             st.error(f"Error processing file {pdf_file_name}: {str(e)}")
+
     recreate_qdrant_collection()
 
     batch_size = 100
@@ -199,17 +189,8 @@ def vectorize_pdfs():
     st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files, including {total_images} images.")
 
 def semantic_search(query, top_k=10):
-    if model is None:
-        st.error("Model is not loaded. Please load the model before proceeding.")
-        return []
-    
-    if qdrant_client is None:
-        st.error("Qdrant client is not initialized. Please initialize the Qdrant client before proceeding.")
-        return []
-    
     query_vector = model.encode(query).tolist()
     
-    # First, search for text results
     text_results = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_vector,
@@ -217,7 +198,6 @@ def semantic_search(query, top_k=10):
         query_filter=Filter(must=[FieldCondition(key="type", match=MatchValue(value="text"))])
     )
     
-    # Then, search for image results
     image_results = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_vector,
@@ -225,7 +205,6 @@ def semantic_search(query, top_k=10):
         query_filter=Filter(must=[FieldCondition(key="type", match=MatchValue(value="image"))])
     )
     
-    # Combine results, prioritizing images from the same pages as relevant text
     relevant_pages = set((r.payload['file_name'], r.payload['page']) for r in text_results)
     prioritized_images = [img for img in image_results if (img.payload['file_name'], img.payload['page']) in relevant_pages]
     other_images = [img for img in image_results if (img.payload['file_name'], img.payload['page']) not in relevant_pages]
@@ -261,103 +240,23 @@ def generate_response(query, context, images):
 
 def display_image(image_data, caption):
     try:
-        st.write(f"Attempting to display image: {caption}")
-        st.write(f"Image data length: {len(image_data)}")
-        st.write(f"First 100 chars of image data: {image_data[:100]}")
-        
-        decoded_image = base64.b64decode(image_data)
-        st.write(f"Decoded image data length: {len(decoded_image)}")
-        
-        image = Image.open(io.BytesIO(decoded_image))
-        st.write(f"Original Image size: {image.size}")
-        st.write(f"Original Image mode: {image.mode}")
-        
-        # Create a dark background (dark gray in this case)
-        background = Image.new('RGBA', image.size, (32, 32, 32, 255))
-        
-        # Convert image to RGBA if it's not already
-        if image.mode != 'RGBA':
-            image = image.convert('RGBA')
-        
-        # Composite the image onto the background
-        composite_image = Image.alpha_composite(background, image)
-        
-        st.write(f"Composite Image size: {composite_image.size}")
-        st.write(f"Composite Image mode: {composite_image.mode}")
-        
-        # Save composite image to file for manual inspection
-        composite_image.save(f"debug_composite_image_{caption.replace(' ', '_')}.png")
-        st.write(f"Composite image saved to file: debug_composite_image_{caption.replace(' ', '_')}.png")
-        
-        # Convert back to RGB for display
-        display_image = composite_image.convert("RGB")
-        
-        # Display the image
-        st.image(display_image, caption=caption, use_column_width=True)
-        st.write("Image displayed successfully")
-        
-        # Also try displaying with markdown
-        buffered = io.BytesIO()
-        display_image.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
-        st.markdown(f'<img src="data:image/png;base64,{img_str}" alt="{caption}" style="background-color: #202020;">', unsafe_allow_html=True)
-        st.write("Image also displayed using markdown")
-        
+        image = Image.open(io.BytesIO(base64.b64decode(image_data)))
+        image = image.convert("RGB")
+        st.image(image, caption=caption, use_column_width=True)
     except Exception as e:
-        st.error(f"Failed to display image: {str(e)}")
+        st.warning(f"Failed to display image: {str(e)}")
         st.write(f"Image data length: {len(image_data)}")
         st.write(f"First 100 chars of image data: {image_data[:100]}")
 
-import streamlit as st
-from PIL import Image, ImageDraw
-import io
-import base64
-
-
-
-def decode_and_save_image(base64_string, output_file):
-    try:
-        image_data = base64.b64decode(base64_string)
-        with open(output_file, "wb") as f:
-            f.write(image_data)
-        print(f"Image saved successfully to {output_file}")
-    except Exception as e:
-        print(f"Error decoding/saving image: {str(e)}")
-
-# Use this function with one of your base64 strings
-base64_string = "iVBORw0KGgoAAAANSUhEUgAAAdsAAAEDCAIAAADydTkhAAADqElEQVR4nO3UMQEAIAzAMMC/5/HggR6Jgl7dM7MACDi/AwB4HBmg..."  # Add the full base64 string here
-decode_and_save_image(base64_string, "decoded_image.png")
-
-def create_test_image():
-    # Create a simple image with some visible content
-    img = Image.new('RGB', (200, 200), color = (73, 109, 137))
-    d = ImageDraw.Draw(img)
-    d.text((20,20), "Test Image", fill=(255,255,0))
-    return img
-
-def image_to_base64(img):
-    buffered = io.BytesIO()
-    img.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
-
-# Create and display test image
-test_img = create_test_image()
-st.image(test_img, caption="Test Image via st.image()")
-
-# Display test image via HTML
-img_base64 = image_to_base64(test_img)
-st.markdown(f'<img src="data:image/png;base64,{img_base64}" alt="Test Image via HTML">', unsafe_allow_html=True)
-
-# Display debug info
-st.write(f"Image size: {test_img.size}")
-st.write(f"Image mode: {test_img.mode}")
-st.write(f"Base64 data length: {len(img_base64)}")
-st.write(f"First 100 chars of base64 data: {img_base64[:100]}")
-
-# Streamlit UI
+# Main Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
 
-# Load the model before any operations
+# Initialize components
+try:
+    openai.api_key = get_api_key()
+except ValueError as e:
+    st.error(str(e))
+
 model = load_model()
 minio_client = initialize_minio()
 qdrant_client = initialize_qdrant()
