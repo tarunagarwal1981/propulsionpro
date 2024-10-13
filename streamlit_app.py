@@ -67,6 +67,14 @@ def initialize_qdrant():
         st.error(f"Qdrant initialization failed: Missing secret key {e}")
         return None
 
+def get_nearby_text(page, rect, max_chars=500):
+    words = page.get_text("words")
+    nearby_words = [w[4] for w in words if fitz.Rect(w[:4]).intersects(rect)]
+    nearby_text = " ".join(nearby_words)
+    if len(nearby_text) > max_chars:
+        nearby_text = nearby_text[:max_chars] + "..."
+    return nearby_text
+
 def extract_images_from_pdf(pdf_content):
     doc = fitz.open(stream=pdf_content, filetype="pdf")
     images = []
@@ -84,9 +92,9 @@ def extract_images_from_pdf(pdf_content):
             image_bytes = base_image["image"]
             image = Image.open(io.BytesIO(image_bytes))
             
-            # Get nearby text (e.g., 500 characters before and after the image)
+            # Get nearby text
             rect = page.get_image_bbox(img)
-            nearby_text = page.get_text("text", clip=rect.expand(500, 500))
+            nearby_text = get_nearby_text(page, rect)
             
             images.append({
                 "page_num": page_num + 1,
@@ -155,7 +163,7 @@ def vectorize_pdfs():
                 metadata_text = f"Page {img_data['page_num']}, Image {img_data['image_index']}\n"
                 metadata_text += f"Page Heading: {img_data['page_heading']}\n"
                 metadata_text += f"Document: {pdf_file_name}\n"
-                metadata_text += f"Nearby Text: {img_data['nearby_text'][:500]}...\n"  # Truncate if too long
+                metadata_text += f"Nearby Text: {img_data['nearby_text']}\n"
                 metadata_text += f"Image Hash: {str(image_hash)}"
 
                 image_vector = process_with_phi2(phi2_model, phi2_tokenizer, f"Describe this image and its context: {metadata_text}")
