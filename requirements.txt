@@ -19,3 +19,4 @@ spire.pdf
 torch
 transformers
 accelerate
+flash-attn
