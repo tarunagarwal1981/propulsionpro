@@ -271,6 +271,15 @@ model = load_model()
 minio_client = initialize_minio()
 qdrant_client = initialize_qdrant()
 
+# Load reference image and calculate its hash
+reference_image_path = "assets/header_image.png"
+try:
+    reference_image = Image.open(reference_image_path)
+    reference_image_hash = imagehash.average_hash(reference_image)
+except FileNotFoundError:
+    st.error(f"Reference header image not found at {reference_image_path}. Please ensure it is available.")
+    reference_image_hash = None
+
 if st.button("Vectorize PDFs"):
     with st.spinner("Vectorizing all PDFs from Cloudflare R2 and saving in Qdrant..."):
         vectorize_pdfs()
