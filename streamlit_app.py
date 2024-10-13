@@ -32,8 +32,8 @@ def load_sentence_transformer_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 @st.cache_resource
-def load_phi3_model():
-    model_id = "microsoft/phi-2"  # Using Phi-2 as it's more widely available
+def load_phi2_model():
+    model_id = "microsoft/phi-2"
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -73,16 +73,32 @@ def extract_images_from_pdf(pdf_content):
     for page_num in range(len(doc)):
         page = doc[page_num]
         image_list = page.get_images(full=True)
+        
+        # Extract page heading (assuming it's the first line of text on the page)
+        page_text = page.get_text()
+        page_heading = page_text.split('\n')[0] if page_text else f"Page {page_num + 1}"
+        
         for img_index, img in enumerate(image_list):
             xref = img[0]
             base_image = doc.extract_image(xref)
             image_bytes = base_image["image"]
             image = Image.open(io.BytesIO(image_bytes))
-            images.append((f"Page {page_num + 1}, Image {img_index + 1}", image))
+            
+            # Get nearby text (e.g., 500 characters before and after the image)
+            rect = page.get_image_bbox(img)
+            nearby_text = page.get_text("text", clip=rect.expand(500, 500))
+            
+            images.append({
+                "page_num": page_num + 1,
+                "image_index": img_index + 1,
+                "image": image,
+                "nearby_text": nearby_text,
+                "page_heading": page_heading
+            })
     doc.close()
     return images
 
-def process_with_phi3(model, tokenizer, text, max_length=500):
+def process_with_phi2(model, tokenizer, text, max_length=500):
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length)
     with torch.no_grad():
         outputs = model.generate(**inputs, max_new_tokens=max_length, temperature=0.7, do_sample=False)
@@ -105,7 +121,7 @@ def vectorize_pdfs():
 
     vectors = []
     total_images = 0
-    phi3_model, phi3_tokenizer = load_phi3_model()
+    phi2_model, phi2_tokenizer = load_phi2_model()
 
     for pdf_file_name in pdf_file_names:
         try:
@@ -119,7 +135,7 @@ def vectorize_pdfs():
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 text = page.get_text()
-                text_vector = process_with_phi3(phi3_model, phi3_tokenizer, f"Summarize this text: {text}")
+                text_vector = process_with_phi2(phi2_model, phi2_tokenizer, f"Summarize this text: {text}")
                 vectors.append(PointStruct(
                     id=str(uuid.uuid4()),
                     vector=model.encode(text_vector).tolist(),
@@ -131,20 +147,25 @@ def vectorize_pdfs():
                     }
                 ))
 
-            for img_info, image in extracted_images:
-                image_hash = imagehash.average_hash(image)
+            for img_data in extracted_images:
+                image_hash = imagehash.average_hash(img_data["image"])
                 if image_hash == reference_image_hash:
                     continue
 
-                metadata_text = f"{img_info}\nDocument Section: {pdf_file_name.split('_')[0]}\nImage Hash: {str(image_hash)}"
-                image_vector = process_with_phi3(phi3_model, phi3_tokenizer, "Describe this image in detail.")
+                metadata_text = f"Page {img_data['page_num']}, Image {img_data['image_index']}\n"
+                metadata_text += f"Page Heading: {img_data['page_heading']}\n"
+                metadata_text += f"Document: {pdf_file_name}\n"
+                metadata_text += f"Nearby Text: {img_data['nearby_text'][:500]}...\n"  # Truncate if too long
+                metadata_text += f"Image Hash: {str(image_hash)}"
+
+                image_vector = process_with_phi2(phi2_model, phi2_tokenizer, f"Describe this image and its context: {metadata_text}")
 
                 buffered = io.BytesIO()
-                image.save(buffered, format="PNG")
+                img_data["image"].save(buffered, format="PNG")
                 img_str = base64.b64encode(buffered.getvalue()).decode()
 
                 if len(img_str) < 1000:
-                    st.warning(f"Skipping small image: {img_info} from {pdf_file_name}")
+                    st.warning(f"Skipping small image: Page {img_data['page_num']}, Image {img_data['image_index']} from {pdf_file_name}")
                     continue
 
                 vectors.append(PointStruct(
@@ -152,11 +173,13 @@ def vectorize_pdfs():
                     vector=model.encode(image_vector).tolist(),
                     payload={
                         "type": "image",
-                        "page": int(img_info.split(',')[0].split()[-1]),
+                        "page": img_data['page_num'],
+                        "image_index": img_data['image_index'],
                         "content": metadata_text,
                         "file_name": pdf_file_name,
                         "image_data": img_str,
-                        "image_hash": str(image_hash)
+                        "image_hash": str(image_hash),
+                        "page_heading": img_data['page_heading']
                     }
                 ))
 
@@ -195,15 +218,27 @@ def semantic_search(query, top_k=10):
     st.write(f"Query: {query}")
     st.write("Search results:")
     for i, result in enumerate(results):
-        st.write(f"Result {i + 1}: {result.payload['type']} from file {result.payload['file_name']}, Page {result.payload['page']}")
-        st.write(f"Content: {result.payload['content'][:100]}...")
+        if result.payload['type'] == 'text':
+            st.write(f"Result {i + 1}: text from file {result.payload['file_name']}, Page {result.payload['page']}")
+            st.write(f"Content: {result.payload['content'][:100]}...")
+        else:
+            st.write(f"Result {i + 1}: image from file {result.payload['file_name']}, Page {result.payload['page']}, Image {result.payload['image_index']}")
+            st.write(f"Page Heading: {result.payload['page_heading']}")
+            st.write(f"Content: {result.payload['content'][:100]}...")
         st.write(f"Score: {result.score}")
 
     return results
 
 def generate_response(query, context, images):
-    image_descriptions = [f"Image on page {img.payload['page']} of {img.payload['file_name']}: {img.payload['content']}" for img in images if img.payload['type'] == 'image']
-    image_context = "\n".join(image_descriptions)
+    image_descriptions = []
+    for img in images:
+        if img.payload['type'] == 'image':
+            desc = f"Image on page {img.payload['page']} of {img.payload['file_name']}, Image {img.payload['image_index']}:\n"
+            desc += f"Page Heading: {img.payload['page_heading']}\n"
+            desc += f"Content: {img.payload['content'][:500]}..."  # Truncate if too long
+            image_descriptions.append(desc)
+    
+    image_context = "\n\n".join(image_descriptions)
 
     try:
         response = openai.ChatCompletion.create(
@@ -272,11 +307,13 @@ if user_query:
         st.write("Associated Images:")
         for i, result in enumerate(image_results):
             image_data = result.payload.get('image_data')
-            st.write(f"Image {i+1} from {result.payload['file_name']}, Page {result.payload['page']}")
+            st.write(f"Image {i+1} from {result.payload['file_name']}, Page {result.payload['page']}, Image {result.payload['image_index']}")
+            st.write(f"Page Heading: {result.payload['page_heading']}")
             if image_data:
-                display_image(image_data, f"Image from {result.payload['file_name']}, Page {result.payload['page']}")
+                display_image(image_data, f"Image from {result.payload['file_name']}, Page {result.payload['page']}, Image {result.payload['image_index']}")
             else:
                 st.write("Image data not found.")
+            st.write(f"Context: {result.payload['content'][:500]}...")  # Display truncated context
             st.write("---")
 
 st.sidebar.markdown("""
