@@ -12,7 +12,7 @@ import os
 import openai
 import base64
 import fitz  # PyMuPDF
-from transformers import AutoModelForCausalLM, AutoProcessor, AutoConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 import torch
 
 # Set page config
@@ -31,34 +31,19 @@ def get_api_key():
 def load_sentence_transformer_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
+@st.cache_resource
 def load_phi3_model():
-    model_id = "microsoft/Phi-3-vision-128k-instruct"
-
-    # Load the model configuration with trust_remote_code explicitly set to True
-    config = AutoConfig.from_pretrained(
-        model_id,
-        trust_remote_code=True  # Explicitly allow custom code execution
-    )
-    
-    # Specify the device explicitly to avoid GPU-related issues
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Load the model with the modified configuration and trust_remote_code enabled
+    model_id = "microsoft/phi-2"  # Using Phi-2 as it's more widely available
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         config=config,
+        torch_dtype=torch.float16,
         device_map="auto",
-        torch_dtype="auto",
-        trust_remote_code=True  # Allow custom code from the model repository
-    ).to(device)
-    
-    # Load the processor
-    processor = AutoProcessor.from_pretrained(
-        model_id,
-        trust_remote_code=True  # Ensure processor also allows custom code
+        trust_remote_code=True
     )
-
-    return model, processor
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    return model, tokenizer
 
 def initialize_minio():
     try:
@@ -85,37 +70,28 @@ def initialize_qdrant():
 def extract_images_from_pdf(pdf_content):
     doc = fitz.open(stream=pdf_content, filetype="pdf")
     images = []
-
     for page_num in range(len(doc)):
         page = doc[page_num]
         image_list = page.get_images(full=True)
-        
         for img_index, img in enumerate(image_list):
             xref = img[0]
             base_image = doc.extract_image(xref)
             image_bytes = base_image["image"]
-            
             image = Image.open(io.BytesIO(image_bytes))
             images.append((f"Page {page_num + 1}, Image {img_index + 1}", image))
-
     doc.close()
     return images
 
-def process_with_phi3(model, processor, image, prompt):
-    prompt_template = f"<|user|>\n<|image_1|>\n{prompt}<|end|>\n<|assistant|>\n" if image else f"<|user|>\n{prompt}<|end|>\n<|assistant|>\n"
-    inputs = processor(prompt_template, [image] if image else None, return_tensors="pt").to(model.device)
-    
+def process_with_phi3(model, tokenizer, text, max_length=500):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=max_length)
     with torch.no_grad():
-        output_ids = model.generate(**inputs, max_new_tokens=500, temperature=0.7, do_sample=False)
-    
-    output_ids = output_ids[:, inputs['input_ids'].shape[1]:]
-    return processor.batch_decode(output_ids, skip_special_tokens=True)[0]
+        outputs = model.generate(**inputs, max_new_tokens=max_length, temperature=0.7, do_sample=False)
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 def vectorize_pdfs():
     if not minio_client:
         st.error("MinIO client not initialized.")
         return
-
     if reference_image_hash is None:
         st.error("Reference header image hash could not be calculated.")
         return
@@ -129,24 +105,21 @@ def vectorize_pdfs():
 
     vectors = []
     total_images = 0
-
-    phi3_model, phi3_processor = load_phi3_model()
+    phi3_model, phi3_tokenizer = load_phi3_model()
 
     for pdf_file_name in pdf_file_names:
         try:
             response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
             pdf_content = response.read()
             
-            # Extract images using PyMuPDF
             extracted_images = extract_images_from_pdf(pdf_content)
             total_images += len(extracted_images)
 
-            # Process text
             doc = fitz.open(stream=pdf_content, filetype="pdf")
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 text = page.get_text()
-                text_vector = process_with_phi3(phi3_model, phi3_processor, None, f"Summarize this text: {text}")
+                text_vector = process_with_phi3(phi3_model, phi3_tokenizer, f"Summarize this text: {text}")
                 vectors.append(PointStruct(
                     id=str(uuid.uuid4()),
                     vector=model.encode(text_vector).tolist(),
@@ -158,24 +131,19 @@ def vectorize_pdfs():
                     }
                 ))
 
-            # Process images
             for img_info, image in extracted_images:
                 image_hash = imagehash.average_hash(image)
-                
                 if image_hash == reference_image_hash:
                     continue
 
-                metadata_text = f"{img_info}\n"
-                metadata_text += f"Document Section: {pdf_file_name.split('_')[0]}\n"
-                metadata_text += f"Image Hash: {str(image_hash)}"
-
-                image_vector = process_with_phi3(phi3_model, phi3_processor, image, "Describe this image in detail.")
+                metadata_text = f"{img_info}\nDocument Section: {pdf_file_name.split('_')[0]}\nImage Hash: {str(image_hash)}"
+                image_vector = process_with_phi3(phi3_model, phi3_tokenizer, "Describe this image in detail.")
 
                 buffered = io.BytesIO()
                 image.save(buffered, format="PNG")
                 img_str = base64.b64encode(buffered.getvalue()).decode()
 
-                if len(img_str) < 1000:  # Adjust this threshold as needed
+                if len(img_str) < 1000:
                     st.warning(f"Skipping small image: {img_info} from {pdf_file_name}")
                     continue
 
@@ -217,7 +185,6 @@ def vectorize_pdfs():
 
 def semantic_search(query, top_k=10):
     query_vector = model.encode(query).tolist()
-    
     results = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_vector,
