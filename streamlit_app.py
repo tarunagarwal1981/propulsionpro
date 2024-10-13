@@ -34,18 +34,19 @@ def load_model():
 
 from transformers import AutoModelForCausalLM, AutoProcessor, AutoConfig
 
-@st.cache_resource
+from transformers import AutoModelForCausalLM, AutoProcessor, AutoConfig
+
 def load_phi3_model():
     model_id = "microsoft/Phi-3-vision-128k-instruct"
 
     # Load the model configuration first
     config = AutoConfig.from_pretrained(model_id)
     
-    # Disable FlashAttention2 in the model configuration
+    # Disable FlashAttention2 in the model configuration if it exists
     if hasattr(config, "_attn_implementation") and config._attn_implementation == "flash_attention_2":
-        config._attn_implementation = "default"  # Use the default attention mechanism
+        config._attn_implementation = "default"  # Set to default attention
 
-    # Specify the device to avoid GPU-related issues
+    # Specify the device explicitly
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load the model with the modified configuration
@@ -54,12 +55,12 @@ def load_phi3_model():
         config=config,
         device_map="auto",
         torch_dtype="auto",
-        trust_remote_code=True
+        trust_remote_code=True  # Necessary to allow custom code from the model repository
     ).to(device)
-    
+
     # Load the processor
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-    
+
     return model, processor
 
 
