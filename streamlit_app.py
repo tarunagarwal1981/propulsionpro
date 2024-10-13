@@ -14,6 +14,8 @@ import openai
 import base64
 import fitz  # PyMuPDF
 import numpy as np
+from transformers import AutoModelForCausalLM, AutoProcessor
+import torch
 
 # Set page config
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
@@ -30,6 +32,19 @@ def get_api_key():
 @st.cache_resource
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
+
+@st.cache_resource
+def load_phi3_model():
+    model_id = "microsoft/Phi-3-vision-128k-instruct"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, 
+        device_map="auto",
+        torch_dtype="auto",
+        trust_remote_code=True,
+        _attn_implementation='flash_attention_2'
+    ).to("cuda" if torch.cuda.is_available() else "cpu")
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    return model, processor
 
 def initialize_minio():
     try:
@@ -53,20 +68,6 @@ def initialize_qdrant():
         st.error(f"Qdrant initialization failed: Missing secret key {e}")
         return None
 
-def recreate_qdrant_collection():
-    try:
-        qdrant_client.delete_collection(collection_name="manual_vectors")
-    except Exception as e:
-        st.warning(f"Failed to delete existing collection: {e}")
-
-    qdrant_client.create_collection(
-        collection_name="manual_vectors",
-        vectors_config=VectorParams(
-            size=384,
-            distance="Cosine"
-        )
-    )
-
 def extract_images_from_pdf(pdf_content):
     doc = fitz.open(stream=pdf_content, filetype="pdf")
     images = []
@@ -85,6 +86,20 @@ def extract_images_from_pdf(pdf_content):
 
     doc.close()
     return images
+
+def process_with_phi3(model, processor, image, prompt):
+    prompt_template = f"<|user|>\n{('<|image_1|>\n' if image else '')}{prompt}<|end|>\n<|assistant|>\n"
+    inputs = processor(prompt_template, [image] if image else None, return_tensors="pt").to(model.device)
+    
+    generation_args = {
+        "max_new_tokens": 500,
+        "temperature": 0.7,
+        "do_sample": False
+    }
+    
+    output_ids = model.generate(**inputs, **generation_args)
+    output_ids = output_ids[:, inputs['input_ids'].shape[1]:]
+    return processor.batch_decode(output_ids, skip_special_tokens=True)[0]
 
 def vectorize_pdfs():
     if not minio_client:
@@ -105,6 +120,8 @@ def vectorize_pdfs():
     vectors = []
     total_images = 0
 
+    phi3_model, phi3_processor = load_phi3_model()
+
     for pdf_file_name in pdf_file_names:
         try:
             response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
@@ -114,25 +131,22 @@ def vectorize_pdfs():
             extracted_images = extract_images_from_pdf(pdf_content)
             total_images += len(extracted_images)
 
-            # Process text (you may need to adjust this part based on your requirements)
+            # Process text
             doc = fitz.open(stream=pdf_content, filetype="pdf")
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 text = page.get_text()
-                sentences = re.split(r'(?<=[.!?])\s+', text)
-                for sentence in sentences:
-                    if len(sentence.strip()) > 0:
-                        embedding = model.encode(sentence.strip()).tolist()
-                        vectors.append(PointStruct(
-                            id=str(uuid.uuid4()),
-                            vector=embedding,
-                            payload={
-                                "type": "text",
-                                "page": page_num + 1,
-                                "content": sentence.strip(),
-                                "file_name": pdf_file_name,
-                            }
-                        ))
+                text_vector = process_with_phi3(phi3_model, phi3_processor, None, f"Summarize this text: {text}")
+                vectors.append(PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=model.encode(text_vector).tolist(),
+                    payload={
+                        "type": "text",
+                        "page": page_num + 1,
+                        "content": text,
+                        "file_name": pdf_file_name,
+                    }
+                ))
 
             # Process images
             for img_info, image in extracted_images:
@@ -145,7 +159,7 @@ def vectorize_pdfs():
                 metadata_text += f"Document Section: {pdf_file_name.split('_')[0]}\n"
                 metadata_text += f"Image Hash: {str(image_hash)}"
 
-                image_vector = model.encode(metadata_text).tolist()
+                image_vector = process_with_phi3(phi3_model, phi3_processor, image, "Describe this image in detail.")
 
                 buffered = io.BytesIO()
                 image.save(buffered, format="PNG")
@@ -157,7 +171,7 @@ def vectorize_pdfs():
 
                 vectors.append(PointStruct(
                     id=str(uuid.uuid4()),
-                    vector=image_vector,
+                    vector=model.encode(image_vector).tolist(),
                     payload={
                         "type": "image",
                         "page": int(img_info.split(',')[0].split()[-1]),
@@ -175,7 +189,10 @@ def vectorize_pdfs():
         except Exception as e:
             st.error(f"Error processing file {pdf_file_name}: {str(e)}")
 
-    recreate_qdrant_collection()
+    qdrant_client.recreate_collection(
+        collection_name="manual_vectors",
+        vectors_config=VectorParams(size=model.get_sentence_embedding_dimension(), distance="Cosine")
+    )
 
     batch_size = 100
     for i in range(0, len(vectors), batch_size):
@@ -191,35 +208,21 @@ def vectorize_pdfs():
 def semantic_search(query, top_k=10):
     query_vector = model.encode(query).tolist()
     
-    text_results = qdrant_client.search(
+    results = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_vector,
-        limit=top_k,
-        query_filter=Filter(must=[FieldCondition(key="type", match=MatchValue(value="text"))])
+        limit=top_k
     )
     
-    image_results = qdrant_client.search(
-        collection_name="manual_vectors",
-        query_vector=query_vector,
-        limit=top_k,
-        query_filter=Filter(must=[FieldCondition(key="type", match=MatchValue(value="image"))])
-    )
-    
-    relevant_pages = set((r.payload['file_name'], r.payload['page']) for r in text_results)
-    prioritized_images = [img for img in image_results if (img.payload['file_name'], img.payload['page']) in relevant_pages]
-    other_images = [img for img in image_results if (img.payload['file_name'], img.payload['page']) not in relevant_pages]
-    
-    combined_results = text_results + prioritized_images + other_images
-    
-    st.write(f"Semantic search returned {len(combined_results)} results ({len(text_results)} text, {len(prioritized_images)} prioritized images, {len(other_images)} other images).")
+    st.write(f"Semantic search returned {len(results)} results.")
     st.write(f"Query: {query}")
     st.write("Search results:")
-    for i, result in enumerate(combined_results):
+    for i, result in enumerate(results):
         st.write(f"Result {i + 1}: {result.payload['type']} from file {result.payload['file_name']}, Page {result.payload['page']}")
         st.write(f"Content: {result.payload['content'][:100]}...")
         st.write(f"Score: {result.score}")
 
-    return combined_results
+    return results
 
 def generate_response(query, context, images):
     image_descriptions = [f"Image on page {img.payload['page']} of {img.payload['file_name']}: {img.payload['content']}" for img in images if img.payload['type'] == 'image']
@@ -240,24 +243,13 @@ def generate_response(query, context, images):
 
 def display_image(image_data, caption):
     try:
-        st.write(f"Attempting to display image: {caption}")
-        st.write(f"Image data length: {len(image_data)}")
-        st.write(f"First 100 chars of image data: {image_data[:100]}")
-        
         decoded_image = base64.b64decode(image_data)
-        st.write(f"Decoded image data length: {len(decoded_image)}")
-        
         image = Image.open(io.BytesIO(decoded_image))
-        st.write(f"Image size: {image.size}")
-        st.write(f"Image mode: {image.mode}")
-        
         image = image.convert("RGB")
         st.image(image, caption=caption, use_column_width=True)
-        st.write("Image displayed successfully")
     except Exception as e:
         st.error(f"Failed to display image: {str(e)}")
-        st.write(f"Image data length: {len(image_data)}")
-        st.write(f"First 100 chars of image data: {image_data[:100]}")
+
 # Main Streamlit UI
 st.title('PropulsionPro: Vectorization and Query System')
 
