@@ -36,9 +36,10 @@ def load_model():
 def load_phi3_model():
     model_id = "microsoft/Phi-3-vision-128k-instruct"
 
-    # Specify the device explicitly to avoid issues
+    # Specify the device explicitly to avoid GPU-related issues
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
+    # Load the model without enabling FlashAttention2
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         device_map="auto",
@@ -46,12 +47,15 @@ def load_phi3_model():
         trust_remote_code=True
     ).to(device)
     
-    # Disable FlashAttention if not available
+    # Disable FlashAttention2 if it is automatically enabled by the model configuration
     if hasattr(model.config, "_attn_implementation") and model.config._attn_implementation == "flash_attention_2":
-        model.config._attn_implementation = "default"  # Set to default attention
+        model.config._attn_implementation = "default"  # Switch to the default attention mechanism
     
+    # Load the processor
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    
     return model, processor
+
 
 
 
