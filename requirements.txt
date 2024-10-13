@@ -5,19 +5,16 @@ numpy
 pandas
 scikit-learn
 pillow
-minio 
+minio
 python-dotenv
 PyMuPDF
-openai == 0.28
+openai==0.28
 langchain
-sentence-transformers 
+sentence-transformers
 pytesseract
 qdrant-client
 imagehash
 pdf2image
 spire.pdf
-flash_attn==2.5.8
-Requests==2.31.0
-torch==2.3.0
-torchvision==0.18.0
-transformers==4.40.2
+torch
+transformers
