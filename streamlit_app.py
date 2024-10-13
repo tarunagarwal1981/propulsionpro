@@ -85,7 +85,9 @@ def extract_images_from_pdf(pdf_content):
     return images
 
 def process_with_phi3(model, processor, image, prompt):
-    prompt_template = f"<|user|>\n{('<|image_1|>\n' if image else '')}{prompt}<|end|>\n<|assistant|>\n"
+    prompt_template = "<|user|>\n{}<|end|>\n<|assistant|>\n".format(
+        "<|image_1|>\n" + prompt if image else prompt
+    )
     inputs = processor(prompt_template, [image] if image else None, return_tensors="pt").to(model.device)
     
     with torch.no_grad():
