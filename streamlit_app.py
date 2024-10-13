@@ -28,6 +28,12 @@ def get_api_key():
         raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
     return api_key
 
+# Set OpenAI API key
+try:
+    openai.api_key = get_api_key()
+except ValueError as e:
+    st.error(str(e))
+
 @st.cache_resource
 def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
