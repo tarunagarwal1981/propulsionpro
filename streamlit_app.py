@@ -34,22 +34,25 @@ def load_model():
 
 @st.cache_resource
 def load_phi3_model():
-    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-
     model_id = "microsoft/Phi-3-vision-128k-instruct"
-    
-    # Check if CUDA is available and choose the correct device
+
+    # Specify the device explicitly to avoid issues
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        device_map="auto",  # Change device assignment as per your requirements
-        torch_dtype="auto", 
+        device_map="auto",
+        torch_dtype="auto",
         trust_remote_code=True
     ).to(device)
     
+    # Disable FlashAttention if not available
+    if hasattr(model.config, "_attn_implementation") and model.config._attn_implementation == "flash_attention_2":
+        model.config._attn_implementation = "default"  # Set to default attention
+    
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
     return model, processor
+
 
 
 def initialize_minio():
