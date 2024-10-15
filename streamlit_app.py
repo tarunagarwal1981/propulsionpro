@@ -97,6 +97,8 @@ def main():
                     st.subheader("Associated Images:")
                     for i, img_data in enumerate(images):
                         st.image(img_data['image'], caption=img_data['description'], use_column_width=True)
+                        # Explicitly include the image reference in the response
+                        st.write(f"Refer to: {img_data['description']}")
 
 if __name__ == "__main__":
     main()
