@@ -84,16 +84,16 @@ def image_to_base64(image):
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
-def save_to_json(data):
-    class NumpyEncoder(json.JSONEncoder):
-        def default(self, obj):
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            if isinstance(obj, Image.Image):
-                return image_to_base64(obj)
-            return json.JSONEncoder.default(self, obj)
+# def save_to_json(data):
+#     class NumpyEncoder(json.JSONEncoder):
+#         def default(self, obj):
+#             if isinstance(obj, np.ndarray):
+#                 return obj.tolist()
+#             if isinstance(obj, Image.Image):
+#                 return image_to_base64(obj)
+#             return json.JSONEncoder.default(self, obj)
 
-    return json.dumps(data, cls=NumpyEncoder, indent=2)
+#     return json.dumps(data, cls=NumpyEncoder, indent=2)
 
 def visualize_sections(processed_doc):
     section_lengths = [len(section['content']) for section in processed_doc]
@@ -108,9 +108,9 @@ def visualize_sections(processed_doc):
     plt.tight_layout()
     st.pyplot(fig)
 
-def display_images(images):
-    for i, image in enumerate(images):
-        st.image(image, caption=f"Image {i+1}", use_column_width=True)
+# def display_images(images):
+#     for i, image in enumerate(images):
+#         st.image(image, caption=f"Image {i+1}", use_column_width=True)
 
 def get_api_key():
     if 'openai' in st.secrets:
