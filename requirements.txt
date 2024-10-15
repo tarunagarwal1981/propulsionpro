@@ -20,3 +20,4 @@ torch
 transformers
 accelerate
 matplotlib
+poppler-utils
