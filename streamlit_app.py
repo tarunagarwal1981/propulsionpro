@@ -229,7 +229,6 @@ def main():
             # Run processing in a separate thread to avoid blocking the UI
             thread = threading.Thread(target=process_pdf_in_background, args=(pdf_file,))
             thread.start()
-            thread.join()
 
     user_query = st.text_input("Ask a question about marine engine maintenance:")
 
