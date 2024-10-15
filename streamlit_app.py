@@ -20,7 +20,7 @@ qdrant_client = QdrantClient(
 
 # Load the SentenceTransformer models
 sentence_transformer_384 = SentenceTransformer('all-MiniLM-L6-v2')
-sentence_transformer_1000 = SentenceTransformer('sentence-transformers/stsb-xlm-r-multilingual')
+sentence_transformer_768 = SentenceTransformer('sentence-transformers/stsb-xlm-r-multilingual')
 
 def get_api_key():
     if 'openai' in st.secrets:
@@ -53,12 +53,25 @@ def generate_response(query, context, images):
         st.error(f"Failed to generate response: {str(e)}")
         return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
 
+def create_1000dim_vector(query):
+    # Get the 768-dimensional vector
+    vector_768 = sentence_transformer_768.encode(query)
+    
+    # Create additional random 232 dimensions
+    additional_dims = np.random.rand(232)
+    
+    # Combine and normalize
+    vector_1000 = np.concatenate([vector_768, additional_dims])
+    vector_1000 = vector_1000 / np.linalg.norm(vector_1000)
+    
+    return vector_1000.tolist()
+
 def fetch_context_and_images(query, collection_name, top_k=5):
     try:
         if collection_name == "manual_vectors":
             query_vector = sentence_transformer_384.encode(query).tolist()
         elif collection_name == "document_sections":
-            query_vector = sentence_transformer_1000.encode(query).tolist()
+            query_vector = create_1000dim_vector(query)
         else:
             raise ValueError(f"Unknown collection name: {collection_name}")
         
