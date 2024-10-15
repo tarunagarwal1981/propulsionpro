@@ -159,9 +159,29 @@ def process_pdf_in_background(pdf_file):
     processed_doc = processor.process_document()
     save_to_qdrant(processed_doc, uploaded_file.name)
 
-def semantic_search(query, top_k=5):
-    if qdrant_client is None:
-        st.warning("Qdrant is not available. Search functionality is limited.")
+def semantic_search(query, top_k=10):
+    query_vector = TfidfVectorizer().fit_transform([query]).toarray()[0]
+    try:
+        results = qdrant_client.search(
+            collection_name="manual_vectors",
+            query_vector=query_vector.tolist(),
+            limit=top_k
+        )
+        st.write(f"Semantic search returned {len(results)} results.")
+        st.write(f"Query: {query}")
+        st.write("Search results:")
+        for i, result in enumerate(results):
+            if result.payload.get('type') == 'text':
+                st.write(f"Result {i + 1}: text from file {result.payload['file_name']}, Page {result.payload.get('page', 'N/A')}")
+                st.write(f"Content: {result.payload['content'][:100]}...")
+            else:
+                st.write(f"Result {i + 1}: image from file {result.payload['file_name']}, Page {result.payload.get('page', 'N/A')}, Image {result.payload.get('image_index', 'N/A')}")
+                st.write(f"Page Heading: {result.payload.get('page_heading', 'N/A')}")
+                st.write(f"Content: {result.payload['content'][:100]}...")
+            st.write(f"Score: {result.score}")
+        return results
+    except Exception as e:
+        st.error(f"Failed to perform search in Qdrant: {str(e)}")
         return []
 
     query_vector = TfidfVectorizer().fit_transform([query]).toarray()[0]
