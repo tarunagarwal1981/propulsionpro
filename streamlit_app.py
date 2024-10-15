@@ -137,10 +137,14 @@ def display_results(response, images, collection_name):
                 else:
                     st.warning(f"Image {image_index + 1} not found in fetched data.")
     
-    # Display all fetched images
-    st.subheader(f"All Fetched Images from {collection_name}:")
-    for i, img in enumerate(images):
-        st.image(img['image'], caption=f"Image {i+1}: {img['description']}", use_column_width=True)
+    # Display all fetched images that weren't shown inline
+    st.subheader(f"Additional Images from {collection_name}:")
+    unused_images = [img for i, img in enumerate(images) if f"[Image {i+1}]" not in response]
+    if unused_images:
+        for i, img in enumerate(unused_images):
+            st.image(img['image'], caption=f"Additional Image {i+1}: {img['description']}", use_column_width=True)
+    else:
+        st.write("No additional images.")
 
 def main():
     st.title('Engine Maintenance Assistant')
