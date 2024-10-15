@@ -2,11 +2,11 @@ import streamlit as st
 import re
 import json
 import PyPDF2
+import fitz  # PyMuPDF
 from io import BytesIO
 from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 import matplotlib.pyplot as plt
-from pdf2image import convert_from_bytes
 from PIL import Image
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, VectorParams
@@ -17,11 +17,6 @@ import base64
 
 # Streamlit configuration
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
-
-# Install necessary packages (this will only work in environments that allow package installation)
-# st.sidebar.info("Installing necessary packages...")
-# os.system("apt-get install -y poppler-utils")
-# os.system("pip install pdf2image PyPDF2 qdrant-client openai")
 
 class DocumentProcessor:
     def __init__(self, text):
@@ -80,7 +75,17 @@ def extract_text_from_pdf(pdf_file):
     return text
 
 def extract_images_from_pdf(pdf_file):
-    images = convert_from_bytes(pdf_file.getvalue())
+    pdf_document = fitz.open(stream=pdf_file.getvalue(), filetype="pdf")
+    images = []
+    for page_num in range(len(pdf_document)):
+        page = pdf_document[page_num]
+        image_list = page.get_images(full=True)
+        for img_index, img in enumerate(image_list):
+            xref = img[0]
+            base_image = pdf_document.extract_image(xref)
+            image_bytes = base_image["image"]
+            image = Image.open(BytesIO(image_bytes))
+            images.append(image)
     return images
 
 def save_to_json(data):
