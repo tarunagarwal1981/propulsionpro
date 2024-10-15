@@ -271,14 +271,24 @@ if user_query:
         search_results = semantic_search(user_query)
         if search_results:
             context = "\n".join([result.payload['content'] for result in search_results])
-            images = [Image.open(BytesIO(base64.b64decode(img))) for result in search_results for img in result.payload['images']]
+            images = []
+            for result in search_results:
+                if 'images' in result.payload:
+                    try:
+                        for img_base64 in result.payload['images']:
+                            img = Image.open(BytesIO(base64.b64decode(img_base64)))
+                            images.append(img)
+                    except Exception as e:
+                        st.warning(f"Failed to load an image: {str(e)}")
+            
             response = generate_response(user_query, context, images)
 
             st.subheader("Response:")
             st.write(response)
 
-            st.subheader("Relevant Images:")
-            display_images(images)
+            if images:
+                st.subheader("Relevant Images:")
+                display_images(images)
 
             st.subheader("Relevant Sections:")
             for result in search_results:
