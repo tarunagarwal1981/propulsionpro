@@ -196,6 +196,7 @@ def generate_response(query, context, images):
         context_with_images = f"{context}
 
 Available images: {', '.join(image_descriptions)}"
+Available images: {', '.join(image_descriptions)}"
         
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
