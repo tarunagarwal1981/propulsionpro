@@ -4,7 +4,7 @@ import json
 import PyPDF2
 from pdf2image import convert_from_bytes
 from io import BytesIO
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -21,7 +21,7 @@ st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
 class DocumentProcessor:
     def __init__(self, text):
         self.text = text
-        self.vectorizer = SentenceTransformer('all-MiniLM-L6-v2')
+        self.vectorizer = TfidfVectorizer()
 
     def extract_sections(self):
         sections = re.split(r'\n(?=\d{3}-\d+\.)', self.text)
@@ -41,7 +41,7 @@ class DocumentProcessor:
 
     def vectorize_text(self, text):
         try:
-            vector = self.vectorizer.encode(text)
+            vector = self.vectorizer.fit_transform([text])
             return vector.toarray()[0]
         except Exception as e:
             st.error(f"Vectorization failed: {str(e)}")
@@ -159,29 +159,9 @@ def process_pdf_in_background(pdf_file):
     processed_doc = processor.process_document()
     save_to_qdrant(processed_doc, uploaded_file.name)
 
-def semantic_search(query, top_k=10):
-    query_vector = self.vectorizer.encode(query)
-    try:
-        results = qdrant_client.search(
-            collection_name="manual_vectors",
-            query_vector=query_vector.tolist(),
-            limit=top_k
-        )
-        st.write(f"Semantic search returned {len(results)} results.")
-        st.write(f"Query: {query}")
-        st.write("Search results:")
-        for i, result in enumerate(results):
-            if result.payload.get('type') == 'text':
-                st.write(f"Result {i + 1}: text from file {result.payload['file_name']}, Page {result.payload.get('page', 'N/A')}")
-                st.write(f"Content: {result.payload['content'][:100]}...")
-            else:
-                st.write(f"Result {i + 1}: image from file {result.payload['file_name']}, Page {result.payload.get('page', 'N/A')}, Image {result.payload.get('image_index', 'N/A')}")
-                st.write(f"Page Heading: {result.payload.get('page_heading', 'N/A')}")
-                st.write(f"Content: {result.payload['content'][:100]}...")
-            st.write(f"Score: {result.score}")
-        return results
-    except Exception as e:
-        st.error(f"Failed to perform search in Qdrant: {str(e)}")
+def semantic_search(query, top_k=5):
+    if qdrant_client is None:
+        st.warning("Qdrant is not available. Search functionality is limited.")
         return []
 
     query_vector = TfidfVectorizer().fit_transform([query]).toarray()[0]
