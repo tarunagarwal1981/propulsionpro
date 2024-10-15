@@ -4,12 +4,12 @@ import json
 import PyPDF2
 import fitz  # PyMuPDF
 from io import BytesIO
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, VectorParams
+from qdrant_client.models import PointStruct, VectorParams, Distance
 import uuid
 import os
 import openai
@@ -18,10 +18,15 @@ import base64
 # Streamlit configuration
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
 
+@st.cache_resource
+def load_sentence_transformer():
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+sentence_transformer = load_sentence_transformer()
+
 class DocumentProcessor:
     def __init__(self, text):
         self.text = text
-        self.vectorizer = TfidfVectorizer()
 
     def extract_sections(self):
         sections = re.split(r'\n(?=\d{3}-\d+\.)', self.text)
@@ -40,8 +45,7 @@ class DocumentProcessor:
         return image_desc
 
     def vectorize_text(self, text):
-        vector = self.vectorizer.fit_transform([text])
-        return vector.toarray()[0]
+        return sentence_transformer.encode(text).tolist()
 
     def process_section(self, section):
         title_match = re.match(r'(\d{3}-\d+\..*?)\n', section)
@@ -59,7 +63,7 @@ class DocumentProcessor:
             "tables": tables,
             "procedures": procedures,
             "image_descriptions": image_descriptions,
-            "vector": vector.tolist()
+            "vector": vector
         }
 
     def process_document(self):
@@ -124,10 +128,18 @@ def get_api_key():
 
 def initialize_qdrant():
     try:
-        return QdrantClient(
+        client = QdrantClient(
             url=st.secrets["qdrant"]["url"],
             api_key=st.secrets["qdrant"]["api_key"]
         )
+        # Ensure the collection exists with the correct vector dimension
+        collections = client.get_collections().collections
+        if not any(collection.name == "manual_vectors" for collection in collections):
+            client.create_collection(
+                collection_name="manual_vectors",
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
+            )
+        return client
     except KeyError as e:
         st.error(f"Qdrant initialization failed: Missing secret key {e}")
         return None
@@ -177,11 +189,11 @@ def semantic_search(query, top_k=5):
         st.warning("Qdrant is not available. Search functionality is limited.")
         return []
 
-    query_vector = TfidfVectorizer().fit_transform([query]).toarray()[0]
+    query_vector = sentence_transformer.encode(query).tolist()
     try:
         search_result = qdrant_client.search(
             collection_name="manual_vectors",
-            query_vector=query_vector.tolist(),
+            query_vector=query_vector,
             limit=top_k
         )
         return search_result
