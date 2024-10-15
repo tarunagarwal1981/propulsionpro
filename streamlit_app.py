@@ -19,8 +19,9 @@ import threading
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
 
 class DocumentProcessor:
-    def __init__(self, text):
+    def __init__(self, text, images):
         self.text = text
+        self.images = images
         self.vectorizer = SentenceTransformer('all-MiniLM-L6-v2')
 
     def extract_sections(self):
@@ -42,14 +43,14 @@ class DocumentProcessor:
     def vectorize_text(self, text):
         try:
             vector = self.vectorizer.encode(text)
-            return vector.toarray()[0]
+            return vector.tolist()
         except Exception as e:
             st.error(f"Vectorization failed: {str(e)}")
-            return np.zeros(384)  # Return a default vector of zeros in case of failure
+            return [0] * 384  # Return a default vector of zeros in case of failure
 
-    def process_section(self, section):
+    def process_section(self, section, index):
         title_match = re.match(r'(\d{3}-\d+\..*?)\n', section)
-        title = title_match.group(1) if title_match else "Untitled Section"
+        title = title_match.group(1) if title_match else f"Untitled Section {index}"
         content = section[len(title):].strip() if title_match else section
 
         tables = self.extract_data_tables(content)
@@ -57,18 +58,23 @@ class DocumentProcessor:
         image_descriptions = self.identify_image_descriptions(content)
         vector = self.vectorize_text(content)
 
+        # Assign an image to this section if available
+        image = self.images[index] if index < len(self.images) else None
+        image_data = image_to_base64(image) if image else None
+
         return {
             "title": title,
             "content": content,
             "tables": tables,
             "procedures": procedures,
             "image_descriptions": image_descriptions,
-            "vector": vector.tolist()
+            "vector": vector,
+            "image": image_data
         }
 
     def process_document(self):
         sections = self.extract_sections()
-        processed_sections = [self.process_section(section) for section in sections]
+        processed_sections = [self.process_section(section, i) for i, section in enumerate(sections)]
         return processed_sections
 
 def extract_text_from_pdf(pdf_file, max_pages=5):
@@ -87,6 +93,13 @@ def extract_images_from_pdf(pdf_file, max_images=5):
     except Exception as e:
         st.warning(f"Image extraction failed: {str(e)}")
         return []
+
+def image_to_base64(image):
+    if image is None:
+        return None
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
 
 def get_api_key():
     if 'openai' in st.secrets:
@@ -138,7 +151,7 @@ def save_to_qdrant(processed_doc, file_name):
                 "title": section['title'],
                 "content": section['content'],
                 "file_name": file_name,
-                "images": []  # No images as they are not displayed
+                "image": section['image']
             }
         )
         points.append(point)
@@ -155,7 +168,8 @@ def save_to_qdrant(processed_doc, file_name):
 
 def process_pdf_in_background(pdf_file):
     pdf_text = extract_text_from_pdf(pdf_file)
-    processor = DocumentProcessor(pdf_text)
+    pdf_images = extract_images_from_pdf(pdf_file)
+    processor = DocumentProcessor(pdf_text, pdf_images)
     processed_doc = processor.process_document()
     save_to_qdrant(processed_doc, uploaded_file.name)
 
@@ -166,11 +180,11 @@ def semantic_search(query, top_k=5):
         st.warning("Qdrant is not available. Search functionality is limited.")
         return []
 
-    query_vector = sentence_transformer.encode(query)
+    query_vector = sentence_transformer.encode(query).tolist()
     try:
         search_result = qdrant_client.search(
             collection_name="manual_vectors",
-            query_vector=query_vector.tolist(),
+            query_vector=query_vector,
             limit=top_k
         )
         return search_result
@@ -214,7 +228,6 @@ if uploaded_file is not None:
         thread.start()
         thread.join()
 
-    
 user_query = st.text_input("Ask a question about marine engine maintenance:")
 
 if user_query:
@@ -222,10 +235,16 @@ if user_query:
         search_results = semantic_search(user_query)
         if search_results:
             context = "\n".join([result.payload['content'] for result in search_results])
-            response = generate_response(user_query, context, [])
+            images = [Image.open(BytesIO(base64.b64decode(result.payload['image']))) for result in search_results if result.payload.get('image')]
+            response = generate_response(user_query, context, images)
 
             st.subheader("Response:")
             st.write(response)
+
+            if images:
+                st.subheader("Relevant Images:")
+                for i, img in enumerate(images):
+                    st.image(img, caption=f"Image {i+1}", use_column_width=True)
 
             st.subheader("Relevant Sections:")
             for result in search_results:
@@ -241,7 +260,7 @@ st.sidebar.markdown("""
 1. Upload a PDF manual using the file uploader.
 2. Wait for the PDF to be processed and saved to the vector database.
 3. Ask a question about marine engine maintenance in the text input field.
-4. Review the AI-generated response and relevant sections from the manual.
+4. Review the AI-generated response, relevant images, and sections from the manual.
 
 Note: If Qdrant is not available, some features may be limited.
 """)
