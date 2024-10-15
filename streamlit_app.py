@@ -178,11 +178,7 @@ if uploaded_file is not None:
         thread.start()
         thread.join()
 
-    st.subheader("Document Structure")
-    processor = DocumentProcessor(extract_text_from_pdf(pdf_file))
-    processed_doc = processor.process_document()
-    visualize_sections(processed_doc)
-
+    
 user_query = st.text_input("Ask a question about marine engine maintenance:")
 
 if user_query:
