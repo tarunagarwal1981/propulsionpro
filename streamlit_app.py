@@ -25,8 +25,9 @@ def load_sentence_transformer():
 sentence_transformer = load_sentence_transformer()
 
 class DocumentProcessor:
-    def __init__(self, text):
+    def __init__(self, text, images):
         self.text = text
+        self.images = images
 
     def extract_sections(self):
         sections = re.split(r'\n(?=\d{3}-\d+\.)', self.text)
@@ -47,9 +48,9 @@ class DocumentProcessor:
     def vectorize_text(self, text):
         return sentence_transformer.encode(text).tolist()
 
-    def process_section(self, section):
+    def process_section(self, section, section_index):
         title_match = re.match(r'(\d{3}-\d+\..*?)\n', section)
-        title = title_match.group(1) if title_match else "Untitled Section"
+        title = title_match.group(1) if title_match else f"Untitled Section {section_index}"
         content = section[len(title):].strip() if title_match else section
 
         tables = self.extract_data_tables(content)
@@ -57,18 +58,22 @@ class DocumentProcessor:
         image_descriptions = self.identify_image_descriptions(content)
         vector = self.vectorize_text(content)
 
+        # Assign images to sections based on their order
+        section_images = self.images[section_index:section_index+1] if section_index < len(self.images) else []
+
         return {
             "title": title,
             "content": content,
             "tables": tables,
             "procedures": procedures,
             "image_descriptions": image_descriptions,
-            "vector": vector
+            "vector": vector,
+            "images": section_images
         }
 
     def process_document(self):
         sections = self.extract_sections()
-        processed_sections = [self.process_section(section) for section in sections]
+        processed_sections = [self.process_section(section, i) for i, section in enumerate(sections)]
         return processed_sections
 
 def extract_text_from_pdf(pdf_file):
@@ -92,11 +97,18 @@ def extract_images_from_pdf(pdf_file):
             images.append(image)
     return images
 
+def image_to_base64(image):
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
 def save_to_json(data):
     class NumpyEncoder(json.JSONEncoder):
         def default(self, obj):
             if isinstance(obj, np.ndarray):
                 return obj.tolist()
+            if isinstance(obj, Image.Image):
+                return image_to_base64(obj)
             return json.JSONEncoder.default(self, obj)
 
     return json.dumps(data, cls=NumpyEncoder, indent=2)
@@ -132,7 +144,6 @@ def initialize_qdrant():
             url=st.secrets["qdrant"]["url"],
             api_key=st.secrets["qdrant"]["api_key"]
         )
-        # Ensure the collection exists with the correct vector dimension
         collections = client.get_collections().collections
         if not any(collection.name == "manual_vectors" for collection in collections):
             client.create_collection(
@@ -144,10 +155,8 @@ def initialize_qdrant():
         st.error(f"Qdrant initialization failed: Missing secret key {e}")
         return None
 
-# Initialize Qdrant client
 qdrant_client = initialize_qdrant()
 
-# Initialize OpenAI
 try:
     openai.api_key = get_api_key()
 except ValueError as e:
@@ -157,7 +166,6 @@ except ValueError as e:
 def save_to_qdrant(processed_doc, file_name):
     if qdrant_client is None:
         st.warning("Qdrant is not available. Saving data locally.")
-        # Save processed_doc locally (you can implement this as needed)
         return
 
     points = []
@@ -168,7 +176,8 @@ def save_to_qdrant(processed_doc, file_name):
             payload={
                 "title": section['title'],
                 "content": section['content'],
-                "file_name": file_name
+                "file_name": file_name,
+                "images": [image_to_base64(img) for img in section['images']]
             }
         )
         points.append(point)
@@ -182,7 +191,6 @@ def save_to_qdrant(processed_doc, file_name):
     except Exception as e:
         st.error(f"Failed to save data to Qdrant: {str(e)}")
         st.warning("Saving data locally as a fallback.")
-        # Implement local saving logic here
 
 def semantic_search(query, top_k=5):
     if qdrant_client is None:
@@ -201,13 +209,16 @@ def semantic_search(query, top_k=5):
         st.error(f"Failed to perform search in Qdrant: {str(e)}")
         return []
 
-def generate_response(query, context):
+def generate_response(query, context, images):
     try:
+        image_descriptions = [f"[Image {i+1}]" for i in range(len(images))]
+        context_with_images = f"{context}\n\nAvailable images: {', '.join(image_descriptions)}"
+        
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures."},
-                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}
+                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures. Use the provided images in your explanation by referring to them as [Image X]."},
+                {"role": "user", "content": f"Context:\n{context_with_images}\n\nQuestion: {query}"}
             ]
         )
         return response.choices[0].message['content']
@@ -218,7 +229,6 @@ def generate_response(query, context):
 # Streamlit UI
 st.title('PropulsionPro: Marine Engine Maintenance Assistant')
 
-# Display Qdrant connection status
 if qdrant_client:
     st.sidebar.success("Connected to Qdrant")
 else:
@@ -235,7 +245,7 @@ if uploaded_file is not None:
         pdf_text = extract_text_from_pdf(pdf_file)
         pdf_images = extract_images_from_pdf(pdf_file)
 
-        processor = DocumentProcessor(pdf_text)
+        processor = DocumentProcessor(pdf_text, pdf_images)
         processed_doc = processor.process_document()
 
         save_to_qdrant(processed_doc, uploaded_file.name)
@@ -254,7 +264,6 @@ if uploaded_file is not None:
         mime="application/json"
     )
 
-# User query
 user_query = st.text_input("Ask a question about marine engine maintenance:")
 
 if user_query:
@@ -262,10 +271,14 @@ if user_query:
         search_results = semantic_search(user_query)
         if search_results:
             context = "\n".join([result.payload['content'] for result in search_results])
-            response = generate_response(user_query, context)
+            images = [Image.open(BytesIO(base64.b64decode(img))) for result in search_results for img in result.payload['images']]
+            response = generate_response(user_query, context, images)
 
             st.subheader("Response:")
             st.write(response)
+
+            st.subheader("Relevant Images:")
+            display_images(images)
 
             st.subheader("Relevant Sections:")
             for result in search_results:
@@ -276,13 +289,12 @@ if user_query:
         else:
             st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
 
-# Sidebar with instructions
 st.sidebar.title("How to use PropulsionPro")
 st.sidebar.markdown("""
 1. Upload a PDF manual using the file uploader.
 2. Wait for the PDF to be processed and saved to the vector database.
 3. Ask a question about marine engine maintenance in the text input field.
-4. Review the AI-generated response and relevant sections from the manual.
+4. Review the AI-generated response, relevant images, and sections from the manual.
 
 Note: If Qdrant is not available, some features may be limited.
 """)
