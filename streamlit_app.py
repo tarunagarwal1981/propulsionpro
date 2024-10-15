@@ -7,6 +7,7 @@ import os
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 import re
+import numpy as np
 
 # Streamlit configuration
 st.set_page_config(page_title="Engine Maintenance Assistant", page_icon="🔧", layout="wide")
@@ -17,8 +18,9 @@ qdrant_client = QdrantClient(
     api_key=st.secrets.get("qdrant", {}).get("api_key", "")
 )
 
-# Load the SentenceTransformer model
-sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
+# Load the SentenceTransformer models
+sentence_transformer_384 = SentenceTransformer('all-MiniLM-L6-v2')
+sentence_transformer_1000 = SentenceTransformer('sentence-transformers/stsb-xlm-r-multilingual')
 
 def get_api_key():
     if 'openai' in st.secrets:
@@ -53,7 +55,12 @@ def generate_response(query, context, images):
 
 def fetch_context_and_images(query, collection_name, top_k=5):
     try:
-        query_vector = sentence_transformer.encode(query).tolist()
+        if collection_name == "manual_vectors":
+            query_vector = sentence_transformer_384.encode(query).tolist()
+        elif collection_name == "document_sections":
+            query_vector = sentence_transformer_1000.encode(query).tolist()
+        else:
+            raise ValueError(f"Unknown collection name: {collection_name}")
         
         search_result = qdrant_client.search(
             collection_name=collection_name,
