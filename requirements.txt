@@ -21,3 +21,4 @@ transformers
 accelerate
 matplotlib
 poppler-utils
+tiktoken
