@@ -83,7 +83,16 @@ def extract_text_from_pdf(pdf_file, max_pages=5):
 def extract_images_from_pdf(pdf_file, max_images=5):
     try:
         images = convert_from_bytes(pdf_file.getvalue(), poppler_path='/usr/bin')
-        return images[:max_images]
+        image_metadata = []
+        for i, image in enumerate(images[:max_images]):
+            buffered = BytesIO()
+            image.save(buffered, format="PNG")
+            image_str = base64.b64encode(buffered.getvalue()).decode()
+            image_metadata.append({
+                "image_index": i + 1,
+                "image_data": image_str
+            })
+        return image_metadata
     except Exception as e:
         st.warning(f"Image extraction failed: {str(e)}")
         return []
@@ -138,7 +147,7 @@ def save_to_qdrant(processed_doc, file_name):
                 "title": section['title'],
                 "content": section['content'],
                 "file_name": file_name,
-                "images": []  # No images as they are not displayed
+                "images": section.get('images', [])  # Include images in the payload
             }
         )
         points.append(point)
@@ -155,8 +164,11 @@ def save_to_qdrant(processed_doc, file_name):
 
 def process_pdf_in_background(pdf_file):
     pdf_text = extract_text_from_pdf(pdf_file)
+    pdf_images = extract_images_from_pdf(pdf_file)
     processor = DocumentProcessor(pdf_text)
     processed_doc = processor.process_document()
+    for section in processed_doc:
+        section['images'] = pdf_images  # Add images to each section
     save_to_qdrant(processed_doc, uploaded_file.name)
 
 sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
@@ -181,16 +193,24 @@ def semantic_search(query, top_k=5):
 def generate_response(query, context, images):
     try:
         image_descriptions = [f"[Image {i+1}]" for i in range(len(images))]
-        context_with_images = f"{context}\n\nAvailable images: {', '.join(image_descriptions)}"
+        context_with_images = f"{context}
+
+Available images: {', '.join(image_descriptions)}"
         
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures. Use the provided images in your explanation by referring to them as [Image X]."},
-                {"role": "user", "content": f"Context:\n{context_with_images}\n\nQuestion: {query}"}
+                {"role": "user", "content": f"Context:
+{context_with_images}
+
+Question: {query}"}
             ]
         )
         return response.choices[0].message['content']
+    except Exception as e:
+        st.error(f"Failed to generate response: {str(e)}")
+        return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
     except Exception as e:
         st.error(f"Failed to generate response: {str(e)}")
         return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
@@ -221,8 +241,13 @@ if user_query:
     with st.spinner("Searching for relevant information..."):
         search_results = semantic_search(user_query)
         if search_results:
-            context = "\n".join([result.payload['content'] for result in search_results])
-            response = generate_response(user_query, context, [])
+            images = []
+            for result in search_results:
+                if 'images' in result.payload:
+                    images.extend(result.payload['images'])
+            context = "
+".join([result.payload['content'] for result in search_results])
+            response = generate_response(user_query, context, images)
 
             st.subheader("Response:")
             st.write(response)
@@ -232,6 +257,9 @@ if user_query:
                 st.write(f"From: {result.payload['file_name']}")
                 st.write(f"Section: {result.payload['title']}")
                 st.write(result.payload['content'][:500] + "...")
+                if 'images' in result.payload:
+                    for img in result.payload['images']:
+                        st.image(base64.b64decode(img['image_data']), caption=f"Image {img['image_index']}", use_column_width=True)
                 st.write("---")
         else:
             st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
