@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 import re
 import numpy as np
+import tiktoken
 
 # Streamlit configuration
 st.set_page_config(page_title="Engine Maintenance Assistant", page_icon="🔧", layout="wide")
@@ -21,6 +22,9 @@ qdrant_client = QdrantClient(
 # Load the SentenceTransformer models
 sentence_transformer_384 = SentenceTransformer('all-MiniLM-L6-v2')
 sentence_transformer_768 = SentenceTransformer('sentence-transformers/stsb-xlm-r-multilingual')
+
+# Initialize tokenizer
+tokenizer = tiktoken.get_encoding("cl100k_base")
 
 def get_api_key():
     if 'openai' in st.secrets:
@@ -36,16 +40,26 @@ except ValueError as e:
     st.error(str(e))
     st.stop()
 
+def truncate_context(context, max_tokens=10000):
+    tokens = tokenizer.encode(context)
+    if len(tokens) > max_tokens:
+        truncated_tokens = tokens[:max_tokens]
+        return tokenizer.decode(truncated_tokens)
+    return context
+
 def generate_response(query, context, images):
     try:
         image_descriptions = [f"[Image {i+1}: {img['description']}]" for i, img in enumerate(images)]
         context_with_images = f"{context}\n\nAvailable images: {', '.join(image_descriptions)}"
         
+        # Truncate context if it's too long
+        truncated_context = truncate_context(context_with_images)
+        
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant that answers questions about engine maintenance. Use the provided images in your explanation by referring to them as [Image X]. Provide step-by-step instructions when applicable."},
-                {"role": "user", "content": f"Context:\n{context_with_images}\n\nQuestion: {query}"}
+                {"role": "user", "content": f"Context:\n{truncated_context}\n\nQuestion: {query}"}
             ]
         )
         return response.choices[0].message['content']
@@ -54,16 +68,10 @@ def generate_response(query, context, images):
         return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
 
 def create_1000dim_vector(query):
-    # Get the 768-dimensional vector
     vector_768 = sentence_transformer_768.encode(query)
-    
-    # Create additional random 232 dimensions
     additional_dims = np.random.rand(232)
-    
-    # Combine and normalize
     vector_1000 = np.concatenate([vector_768, additional_dims])
     vector_1000 = vector_1000 / np.linalg.norm(vector_1000)
-    
     return vector_1000.tolist()
 
 def fetch_context_and_images(query, collection_name, top_k=5):
