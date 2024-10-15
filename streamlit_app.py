@@ -6,10 +6,10 @@ from io import BytesIO
 import os
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
-import requests
+import re
 
 # Streamlit configuration
-st.set_page_config(page_title="RAG Query Pipeline", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Engine Maintenance Assistant", page_icon="🔧", layout="wide")
 
 # Initialize Qdrant client
 qdrant_client = QdrantClient(
@@ -42,7 +42,7 @@ def generate_response(query, context, images):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that answers questions. Use the provided images in your explanation by referring to them as [Image X]."},
+                {"role": "system", "content": "You are a helpful assistant that answers questions about engine maintenance. Use the provided images in your explanation by referring to them as [Image X]. Provide step-by-step instructions when applicable."},
                 {"role": "user", "content": f"Context:\n{context_with_images}\n\nQuestion: {query}"}
             ]
         )
@@ -75,9 +75,9 @@ def fetch_context_and_images(query, top_k=5):
         return "", []
 
 def main():
-    st.title('RAG Query Pipeline with OpenAI')
+    st.title('Engine Maintenance Assistant')
 
-    user_query = st.text_input("Enter your query:")
+    user_query = st.text_input("Enter your maintenance query:")
 
     if user_query:
         with st.spinner("Fetching relevant information..."):
@@ -87,13 +87,39 @@ def main():
             else:
                 response = generate_response(user_query, context, images)
 
-                st.subheader("Response:")
-                st.write(response)
-
-                if images:
-                    st.subheader("Associated Images:")
-                    for i, img_data in enumerate(images):
-                        st.image(img_data['image'], caption=f"Image {i+1}: {img_data['description']}", use_column_width=True)
+                st.subheader("Maintenance Instructions:")
+                
+                # Split the response into paragraphs
+                paragraphs = response.split('\n\n')
+                for paragraph in paragraphs:
+                    # Check if the paragraph mentions an image
+                    image_matches = re.findall(r'\[Image (\d+)', paragraph)
+                    
+                    # Display the paragraph text
+                    st.write(paragraph)
+                    
+                    # Display mentioned images
+                    if image_matches:
+                        cols = st.columns(len(image_matches))
+                        for i, match in enumerate(image_matches):
+                            image_index = int(match) - 1
+                            if image_index < len(images):
+                                with cols[i]:
+                                    st.image(images[image_index]['image'], 
+                                             caption=f"Image {image_index + 1}: {images[image_index]['description']}", 
+                                             use_column_width=True)
+                
+                # Feedback mechanism
+                st.subheader("Was this response helpful?")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("👍 Yes"):
+                        st.success("Thank you for your feedback!")
+                with col2:
+                    if st.button("👎 No"):
+                        st.text_area("Please tell us how we can improve:", key="feedback")
+                        if st.button("Submit Feedback"):
+                            st.success("Thank you for your feedback! We'll use it to improve our system.")
 
 if __name__ == "__main__":
     main()
