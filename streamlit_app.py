@@ -51,12 +51,12 @@ def generate_response(query, context, images):
         st.error(f"Failed to generate response: {str(e)}")
         return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
 
-def fetch_context_and_images(query, top_k=5):
+def fetch_context_and_images(query, collection_name, top_k=5):
     try:
         query_vector = sentence_transformer.encode(query).tolist()
         
         search_result = qdrant_client.search(
-            collection_name="manual_vectors",
+            collection_name=collection_name,
             query_vector=query_vector,
             limit=top_k
         )
@@ -73,11 +73,46 @@ def fetch_context_and_images(query, top_k=5):
                         'description': result.payload.get('description', f"Image {i+1}")
                     })
                 except Exception as e:
-                    st.error(f"Failed to process image {i+1}: {str(e)}")
+                    st.error(f"Failed to process image {i+1} from {collection_name}: {str(e)}")
         return context, images
     except Exception as e:
-        st.error(f"Failed to fetch context and images from Qdrant: {str(e)}")
+        st.error(f"Failed to fetch context and images from {collection_name}: {str(e)}")
         return "", []
+
+def display_results(response, images, collection_name):
+    st.subheader(f"Results from {collection_name}")
+    
+    # Display debugging information
+    st.write(f"Number of images fetched: {len(images)}")
+    for i, img in enumerate(images):
+        st.write(f"Image {i+1} description: {img['description']}")
+    
+    # Split the response into paragraphs
+    paragraphs = response.split('\n\n')
+    for paragraph in paragraphs:
+        # Display the paragraph text
+        st.write(paragraph)
+        
+        # Check if the paragraph mentions an image
+        image_matches = re.findall(r'\[Image (\d+)', paragraph)
+        
+        # Display mentioned images
+        if image_matches:
+            cols = st.columns(len(image_matches))
+            for i, match in enumerate(image_matches):
+                image_index = int(match) - 1
+                if image_index < len(images):
+                    with cols[i]:
+                        st.image(images[image_index]['image'], 
+                                 caption=f"Image {image_index + 1}: {images[image_index]['description']}", 
+                                 use_column_width=True)
+                else:
+                    st.warning(f"Image {image_index + 1} not found in fetched data.")
+    
+    # Display all fetched images
+    st.subheader(f"All Fetched Images from {collection_name}:")
+    for i, img in enumerate(images):
+        st.image(img['image'], caption=f"Image {i+1}: {img['description']}", use_column_width=True)
 
 def main():
     st.title('Engine Maintenance Assistant')
@@ -86,61 +121,34 @@ def main():
 
     if user_query:
         with st.spinner("Fetching relevant information..."):
-            context, images = fetch_context_and_images(user_query)
-            if not context and not images:
-                st.warning("No relevant information or images found.")
-            else:
-                response = generate_response(user_query, context, images)
+            # Fetch from manual_vectors
+            context_manual, images_manual = fetch_context_and_images(user_query, "manual_vectors")
+            response_manual = generate_response(user_query, context_manual, images_manual)
+            
+            # Fetch from document_sections
+            context_doc, images_doc = fetch_context_and_images(user_query, "document_sections")
+            response_doc = generate_response(user_query, context_doc, images_doc)
 
-                st.subheader("Maintenance Instructions:")
+            if not (context_manual or images_manual) and not (context_doc or images_doc):
+                st.warning("No relevant information or images found in either collection.")
+            else:
+                # Display results from manual_vectors
+                display_results(response_manual, images_manual, "manual_vectors")
                 
-                # Display debugging information
-                st.write(f"Number of images fetched: {len(images)}")
-                for i, img in enumerate(images):
-                    st.write(f"Image {i+1} description: {img['description']}")
-                
-                # Split the response into paragraphs
-                paragraphs = response.split('\n\n')
-                for paragraph in paragraphs:
-                    # Display the paragraph text
-                    st.write(paragraph)
-                    
-                    # Check if the paragraph mentions an image
-                    image_matches = re.findall(r'\[Image (\d+)', paragraph)
-                    
-                    # Display mentioned images
-                    if image_matches:
-                        cols = st.columns(len(image_matches))
-                        for i, match in enumerate(image_matches):
-                            image_index = int(match) - 1
-                            if image_index < len(images):
-                                with cols[i]:
-                                    st.image(images[image_index]['image'], 
-                                             caption=f"Image {image_index + 1}: {images[image_index]['description']}", 
-                                             use_column_width=True)
-                                    
-                                    # Attempt to display image using base64 encoding
-                                    img_base64 = base64.b64encode(images[image_index]['image'].tobytes()).decode()
-                                    st.markdown(f'<img src="data:image/png;base64,{img_base64}" alt="Image {image_index + 1}" style="width:100%">', unsafe_allow_html=True)
-                            else:
-                                st.warning(f"Image {image_index + 1} not found in fetched data.")
-                
-                # Display all fetched images
-                st.subheader("All Fetched Images:")
-                for i, img in enumerate(images):
-                    st.image(img['image'], caption=f"Image {i+1}: {img['description']}", use_column_width=True)
-                
-                # Feedback mechanism
-                st.subheader("Was this response helpful?")
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("👍 Yes"):
-                        st.success("Thank you for your feedback!")
-                with col2:
-                    if st.button("👎 No"):
-                        st.text_area("Please tell us how we can improve:", key="feedback")
-                        if st.button("Submit Feedback"):
-                            st.success("Thank you for your feedback! We'll use it to improve our system.")
+                # Display results from document_sections
+                display_results(response_doc, images_doc, "document_sections")
+        
+        # Feedback mechanism
+        st.subheader("Was this response helpful?")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("👍 Yes"):
+                st.success("Thank you for your feedback!")
+        with col2:
+            if st.button("👎 No"):
+                st.text_area("Please tell us how we can improve:", key="feedback")
+                if st.button("Submit Feedback"):
+                    st.success("Thank you for your feedback! We'll use it to improve our system.")
 
 if __name__ == "__main__":
     main()
