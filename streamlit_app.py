@@ -114,19 +114,40 @@ def display_images(images):
     for i, image in enumerate(images):
         st.image(image, caption=f"Image {i+1}", use_column_width=True)
 
-# Initialize Qdrant client
-@st.cache_resource
-def init_qdrant():
-    qdrant_url = os.getenv('QDRANT_URL')
-    qdrant_api_key = os.getenv('QDRANT_API_KEY')
-    return QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+def get_api_key():
+    if 'openai' in st.secrets:
+        return st.secrets['openai']['api_key']
+    api_key = os.getenv('OPENAI_API_KEY')
+    if api_key is None:
+        raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
+    return api_key
 
-qdrant_client = init_qdrant()
+def initialize_qdrant():
+    try:
+        return QdrantClient(
+            url=st.secrets["qdrant"]["url"],
+            api_key=st.secrets["qdrant"]["api_key"]
+        )
+    except KeyError as e:
+        st.error(f"Qdrant initialization failed: Missing secret key {e}")
+        return None
+
+# Initialize Qdrant client
+qdrant_client = initialize_qdrant()
 
 # Initialize OpenAI
-openai.api_key = os.getenv('OPENAI_API_KEY')
+try:
+    openai.api_key = get_api_key()
+except ValueError as e:
+    st.error(str(e))
+    st.stop()
 
 def save_to_qdrant(processed_doc, file_name):
+    if qdrant_client is None:
+        st.warning("Qdrant is not available. Saving data locally.")
+        # Save processed_doc locally (you can implement this as needed)
+        return
+
     points = []
     for section in processed_doc:
         point = PointStruct(
@@ -140,32 +161,56 @@ def save_to_qdrant(processed_doc, file_name):
         )
         points.append(point)
     
-    qdrant_client.upsert(
-        collection_name="manual_vectors",
-        points=points
-    )
+    try:
+        qdrant_client.upsert(
+            collection_name="manual_vectors",
+            points=points
+        )
+        st.success("Data saved to Qdrant successfully!")
+    except Exception as e:
+        st.error(f"Failed to save data to Qdrant: {str(e)}")
+        st.warning("Saving data locally as a fallback.")
+        # Implement local saving logic here
 
 def semantic_search(query, top_k=5):
+    if qdrant_client is None:
+        st.warning("Qdrant is not available. Search functionality is limited.")
+        return []
+
     query_vector = TfidfVectorizer().fit_transform([query]).toarray()[0]
-    search_result = qdrant_client.search(
-        collection_name="manual_vectors",
-        query_vector=query_vector.tolist(),
-        limit=top_k
-    )
-    return search_result
+    try:
+        search_result = qdrant_client.search(
+            collection_name="manual_vectors",
+            query_vector=query_vector.tolist(),
+            limit=top_k
+        )
+        return search_result
+    except Exception as e:
+        st.error(f"Failed to perform search in Qdrant: {str(e)}")
+        return []
 
 def generate_response(query, context):
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures."},
-            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}
-        ]
-    )
-    return response.choices[0].message['content']
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures."},
+                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {query}"}
+            ]
+        )
+        return response.choices[0].message['content']
+    except Exception as e:
+        st.error(f"Failed to generate response: {str(e)}")
+        return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
 
 # Streamlit UI
 st.title('PropulsionPro: Marine Engine Maintenance Assistant')
+
+# Display Qdrant connection status
+if qdrant_client:
+    st.sidebar.success("Connected to Qdrant")
+else:
+    st.sidebar.error("Not connected to Qdrant. Some features may be limited.")
 
 uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
@@ -182,8 +227,6 @@ if uploaded_file is not None:
         processed_doc = processor.process_document()
 
         save_to_qdrant(processed_doc, uploaded_file.name)
-
-        st.success("PDF processed and saved to vector database!")
 
     st.subheader("Document Structure")
     visualize_sections(processed_doc)
@@ -205,18 +248,21 @@ user_query = st.text_input("Ask a question about marine engine maintenance:")
 if user_query:
     with st.spinner("Searching for relevant information..."):
         search_results = semantic_search(user_query)
-        context = "\n".join([result.payload['content'] for result in search_results])
-        response = generate_response(user_query, context)
+        if search_results:
+            context = "\n".join([result.payload['content'] for result in search_results])
+            response = generate_response(user_query, context)
 
-        st.subheader("Response:")
-        st.write(response)
+            st.subheader("Response:")
+            st.write(response)
 
-        st.subheader("Relevant Sections:")
-        for result in search_results:
-            st.write(f"From: {result.payload['file_name']}")
-            st.write(f"Section: {result.payload['title']}")
-            st.write(result.payload['content'][:500] + "...")
-            st.write("---")
+            st.subheader("Relevant Sections:")
+            for result in search_results:
+                st.write(f"From: {result.payload['file_name']}")
+                st.write(f"Section: {result.payload['title']}")
+                st.write(result.payload['content'][:500] + "...")
+                st.write("---")
+        else:
+            st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
 
 # Sidebar with instructions
 st.sidebar.title("How to use PropulsionPro")
@@ -225,4 +271,6 @@ st.sidebar.markdown("""
 2. Wait for the PDF to be processed and saved to the vector database.
 3. Ask a question about marine engine maintenance in the text input field.
 4. Review the AI-generated response and relevant sections from the manual.
+
+Note: If Qdrant is not available, some features may be limited.
 """)
