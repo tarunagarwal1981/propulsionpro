@@ -15,6 +15,9 @@ import openai
 import base64
 import threading
 
+# Disable file watcher
+os.environ['STREAMLIT_SERVER_ENABLE_STATIC_SERVING'] = 'false'
+
 # Streamlit configuration
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
 
@@ -171,7 +174,7 @@ def process_pdf_in_background(pdf_file):
     pdf_images = extract_images_from_pdf(pdf_file)
     processor = DocumentProcessor(pdf_text, pdf_images)
     processed_doc = processor.process_document()
-    save_to_qdrant(processed_doc, uploaded_file.name)
+    save_to_qdrant(processed_doc, pdf_file.name)
 
 sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -209,58 +212,64 @@ def generate_response(query, context, images):
         st.error(f"Failed to generate response: {str(e)}")
         return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
 
-# Streamlit UI
-st.title('PropulsionPro: Marine Engine Maintenance Assistant')
+def main():
+    st.title('PropulsionPro: Marine Engine Maintenance Assistant')
 
-if qdrant_client:
-    st.sidebar.success("Connected to Qdrant")
-else:
-    st.sidebar.error("Not connected to Qdrant. Some features may be limited.")
+    if qdrant_client:
+        st.sidebar.success("Connected to Qdrant")
+    else:
+        st.sidebar.error("Not connected to Qdrant. Some features may be limited.")
 
-uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+    uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
-if uploaded_file is not None:
-    st.success("File uploaded successfully!")
-    with st.spinner("Processing PDF..."):
-        pdf_file = BytesIO(uploaded_file.getvalue())
-        # Run processing in a separate thread to avoid blocking the UI
-        thread = threading.Thread(target=process_pdf_in_background, args=(pdf_file,))
-        thread.start()
-        thread.join()
+    if uploaded_file is not None:
+        st.success("File uploaded successfully!")
+        with st.spinner("Processing PDF..."):
+            pdf_file = BytesIO(uploaded_file.getvalue())
+            # Run processing in a separate thread to avoid blocking the UI
+            thread = threading.Thread(target=process_pdf_in_background, args=(pdf_file,))
+            thread.start()
+            thread.join()
 
-user_query = st.text_input("Ask a question about marine engine maintenance:")
+    user_query = st.text_input("Ask a question about marine engine maintenance:")
 
-if user_query:
-    with st.spinner("Searching for relevant information..."):
-        search_results = semantic_search(user_query)
-        if search_results:
-            context = "\n".join([result.payload['content'] for result in search_results])
-            images = [Image.open(BytesIO(base64.b64decode(result.payload['image']))) for result in search_results if result.payload.get('image')]
-            response = generate_response(user_query, context, images)
+    if user_query:
+        with st.spinner("Searching for relevant information..."):
+            search_results = semantic_search(user_query)
+            if search_results:
+                context = "\n".join([result.payload['content'] for result in search_results])
+                images = [Image.open(BytesIO(base64.b64decode(result.payload['image']))) for result in search_results if result.payload.get('image')]
+                response = generate_response(user_query, context, images)
 
-            st.subheader("Response:")
-            st.write(response)
+                st.subheader("Response:")
+                st.write(response)
 
-            if images:
-                st.subheader("Relevant Images:")
-                for i, img in enumerate(images):
-                    st.image(img, caption=f"Image {i+1}", use_column_width=True)
+                if images:
+                    st.subheader("Relevant Images:")
+                    for i, img in enumerate(images):
+                        st.image(img, caption=f"Image {i+1}", use_column_width=True)
 
-            st.subheader("Relevant Sections:")
-            for result in search_results:
-                st.write(f"From: {result.payload['file_name']}")
-                st.write(f"Section: {result.payload['title']}")
-                st.write(result.payload['content'][:500] + "...")
-                st.write("---")
-        else:
-            st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
+                st.subheader("Relevant Sections:")
+                for result in search_results:
+                    st.write(f"From: {result.payload['file_name']}")
+                    st.write(f"Section: {result.payload['title']}")
+                    st.write(result.payload['content'][:500] + "...")
+                    st.write("---")
+            else:
+                st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
 
-st.sidebar.title("How to use PropulsionPro")
-st.sidebar.markdown("""
-1. Upload a PDF manual using the file uploader.
-2. Wait for the PDF to be processed and saved to the vector database.
-3. Ask a question about marine engine maintenance in the text input field.
-4. Review the AI-generated response, relevant images, and sections from the manual.
+    st.sidebar.title("How to use PropulsionPro")
+    st.sidebar.markdown("""
+    1. Upload a PDF manual using the file uploader.
+    2. Wait for the PDF to be processed and saved to the vector database.
+    3. Ask a question about marine engine maintenance in the text input field.
+    4. Review the AI-generated response, relevant images, and sections from the manual.
 
-Note: If Qdrant is not available, some features may be limited.
-""")
+    Note: If Qdrant is not available, some features may be limited.
+    """)
+
+    if st.button("Refresh App"):
+        st.experimental_rerun()
+
+if __name__ == "__main__":
+    main()
