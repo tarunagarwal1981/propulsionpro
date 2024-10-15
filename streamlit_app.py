@@ -1,92 +1,24 @@
 import streamlit as st
-import re
-import json
-import PyPDF2
-from pdf2image import convert_from_bytes
-from io import BytesIO
-from sentence_transformers import SentenceTransformer
-import numpy as np
-import matplotlib.pyplot as plt
-from PIL import Image
-from qdrant_client import QdrantClient, models
-import uuid
-import os
 import openai
 import base64
-import threading
+from PIL import Image
+from io import BytesIO
+import os
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+import requests
 
 # Streamlit configuration
-st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
+st.set_page_config(page_title="RAG Query Pipeline", page_icon="🔍", layout="wide")
 
-class DocumentProcessor:
-    def __init__(self, text):
-        self.text = text
-        self.vectorizer = SentenceTransformer('all-MiniLM-L6-v2')
+# Initialize Qdrant client
+qdrant_client = QdrantClient(
+    url=st.secrets.get("qdrant", {}).get("url", ""),
+    api_key=st.secrets.get("qdrant", {}).get("api_key", "")
+)
 
-    def extract_sections(self):
-        sections = re.split(r'\n(?=\d{3}-\d+\.)', self.text)
-        return [section.strip() for section in sections if section.strip()]
-
-    def extract_data_tables(self, text):
-        tables = re.findall(r'(D\d+-\d+.*?(?:\n.*?)+)', text)
-        return tables
-
-    def extract_procedures(self, text):
-        procedures = re.findall(r'(\d+\.\s.*?(?:\n(?!\d+\.).+)*)', text, re.DOTALL)
-        return procedures
-
-    def identify_image_descriptions(self, text):
-        image_desc = re.findall(r'(Figure \d+:.*?(?:\n(?!Figure \d+:).+)*)', text, re.DOTALL)
-        return image_desc
-
-    def vectorize_text(self, text):
-        try:
-            vector = self.vectorizer.encode(text)
-            return vector.toarray()[0]
-        except Exception as e:
-            st.error(f"Vectorization failed: {str(e)}")
-            return np.zeros(384)  # Return a default vector of zeros in case of failure
-
-    def process_section(self, section):
-        title_match = re.match(r'(\d{3}-\d+\..*?)\n', section)
-        title = title_match.group(1) if title_match else "Untitled Section"
-        content = section[len(title):].strip() if title_match else section
-
-        tables = self.extract_data_tables(content)
-        procedures = self.extract_procedures(content)
-        image_descriptions = self.identify_image_descriptions(content)
-        vector = self.vectorize_text(content)
-
-        return {
-            "title": title,
-            "content": content,
-            "tables": tables,
-            "procedures": procedures,
-            "image_descriptions": image_descriptions,
-            "vector": vector.tolist()
-        }
-
-    def process_document(self):
-        sections = self.extract_sections()
-        processed_sections = [self.process_section(section) for section in sections]
-        return processed_sections
-
-def extract_text_from_pdf(pdf_file, max_pages=5):
-    pdf_reader = PyPDF2.PdfReader(pdf_file)
-    text = ""
-    for page_num, page in enumerate(pdf_reader.pages):
-        if page_num >= max_pages:
-            break
-        text += page.extract_text() + "\n"
-    return text
-
-def extract_images_from_pdf(pdf_file, max_images=5):
-    try:
-        images = convert_from_bytes(pdf_file.getvalue(), poppler_path='/usr/bin')
-        return images[:max_images]
-    except Exception as e:
-        st.warning(f"Image extraction failed: {str(e)}")
-        return []
+# Load the SentenceTransformer model
+sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
 
 def get_api_key():
     if 'openai' in st.secrets:
@@ -96,92 +28,11 @@ def get_api_key():
         raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
     return api_key
 
-def initialize_qdrant():
-    try:
-        client = QdrantClient(
-            url=st.secrets["qdrant"]["url"],
-            api_key=st.secrets["qdrant"]["api_key"]
-        )
-        collections = client.get_collections().collections
-        if not any(collection.name == "manual_vectors" for collection in collections):
-            client.create_collection(
-                collection_name="manual_vectors",
-                vectors_config=models.VectorParams(size=384, distance=models.Distance.COSINE),
-            )
-        return client
-    except KeyError as e:
-        st.error(f"Qdrant initialization failed: Missing secret key {e}")
-        return None
-    except Exception as e:
-        st.error(f"Qdrant initialization error: {str(e)}")
-        return None
-
-qdrant_client = initialize_qdrant()
-
 try:
     openai.api_key = get_api_key()
 except ValueError as e:
     st.error(str(e))
     st.stop()
-
-def save_to_qdrant(processed_doc, file_name):
-    if qdrant_client is None:
-        st.warning("Qdrant is not available. Saving data locally.")
-        return
-
-    points = []
-    for section in processed_doc:
-        point = models.PointStruct(
-            id=str(uuid.uuid4()),
-            vector=section['vector'],
-            payload={
-                "title": section['title'],
-                "content": section['content'],
-                "file_name": file_name,
-                "images": [
-                    base64.b64encode(image.tobytes()).decode() for image in section.get('images', [])
-                ]
-            }
-        )
-        points.append(point)
-    
-    try:
-        qdrant_client.upsert(
-            collection_name="manual_vectors",
-            points=points
-        )
-        st.success("Data saved to Qdrant successfully!")
-    except Exception as e:
-        st.error(f"Failed to save data to Qdrant: {str(e)}")
-        st.warning("Saving data locally as a fallback.")
-
-def process_pdf_in_background(pdf_file):
-    pdf_text = extract_text_from_pdf(pdf_file)
-    pdf_images = extract_images_from_pdf(pdf_file)
-    processor = DocumentProcessor(pdf_text)
-    processed_doc = processor.process_document()
-    for section in processed_doc:
-        section['images'] = pdf_images  # Add images to each section
-    save_to_qdrant(processed_doc, uploaded_file.name)
-
-sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
-
-def semantic_search(query, top_k=5):
-    if qdrant_client is None:
-        st.warning("Qdrant is not available. Search functionality is limited.")
-        return []
-
-    query_vector = sentence_transformer.encode(query)
-    try:
-        search_result = qdrant_client.search(
-            collection_name="manual_vectors",
-            query_vector=query_vector.tolist(),
-            limit=top_k
-        )
-        return search_result
-    except Exception as e:
-        st.error(f"Failed to perform search in Qdrant: {str(e)}")
-        return []
 
 def generate_response(query, context, images):
     try:
@@ -191,7 +42,7 @@ def generate_response(query, context, images):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures. Use the provided images in your explanation by referring to them as [Image X]."},
+                {"role": "system", "content": "You are a helpful assistant that answers questions. Use the provided images in your explanation by referring to them as [Image X]."},
                 {"role": "user", "content": f"Context:\n{context_with_images}\n\nQuestion: {query}"}
             ]
         )
@@ -200,70 +51,46 @@ def generate_response(query, context, images):
         st.error(f"Failed to generate response: {str(e)}")
         return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
 
-# Streamlit UI
-st.title('PropulsionPro: Marine Engine Maintenance Assistant')
+def fetch_context_and_images(query, top_k=5):
+    try:
+        # Encode the query using the SentenceTransformer model
+        query_vector = sentence_transformer.encode(query).tolist()
+        
+        # Search the Qdrant vector database
+        search_result = qdrant_client.search(
+            collection_name="manual_vectors",
+            query_vector=query_vector,
+            limit=top_k
+        )
+        
+        # Extract context and images from search results
+        context = "\n".join([result.payload['content'] for result in search_result if 'content' in result.payload])
+        images = [
+            Image.open(BytesIO(base64.b64decode(result.payload['image'])))
+            for result in search_result if result.payload.get('image')
+        ]
+        return context, images
+    except Exception as e:
+        st.error(f"Failed to fetch context and images from Qdrant: {str(e)}")
+        return "", []
 
-if qdrant_client:
-    st.sidebar.success("Connected to Qdrant")
-else:
-    st.sidebar.error("Not connected to Qdrant. Some features may be limited.")
+def main():
+    st.title('RAG Query Pipeline with OpenAI')
 
-uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+    user_query = st.text_input("Enter your query:")
 
-if uploaded_file is not None:
-    st.success("File uploaded successfully!")
-    with st.spinner("Processing PDF..."):
-        pdf_file = BytesIO(uploaded_file.getvalue())
-        # Run processing in a separate thread to avoid blocking the UI
-        thread = threading.Thread(target=process_pdf_in_background, args=(pdf_file,))
-        thread.start()
-        thread.join()
-
-    
-user_query = st.text_input("Ask a question about marine engine maintenance:")
-
-if user_query:
-    with st.spinner("Searching for relevant information..."):
-        search_results = semantic_search(user_query)
-        if search_results:
-            images = []
-            for result in search_results:
-                if 'images' in result.payload:
-                    for img_base64 in result.payload['images']:
-                        try:
-                            img = Image.open(BytesIO(base64.b64decode(img_base64)))
-                            images.append(img)
-                        except Exception as e:
-                            st.warning(f"Failed to load an image: {str(e)}")
-            context = "
-".join([result.payload['content'] for result in search_results])
+    if user_query:
+        with st.spinner("Fetching relevant information..."):
+            context, images = fetch_context_and_images(user_query)
             response = generate_response(user_query, context, images)
 
             st.subheader("Response:")
             st.write(response)
 
-            st.subheader("Relevant Sections:")
-            for result in search_results:
-                st.write(f"From: {result.payload['file_name']}")
-                st.write(f"Section: {result.payload['title']}")
-                st.write(result.payload['content'][:500] + "...")
-                if 'images' in result.payload:
-                    for img_base64 in result.payload['images']:
-                        try:
-                            img = Image.open(BytesIO(base64.b64decode(img_base64)))
-                            st.image(img, caption=f"Image from section {result.payload['title']}", use_column_width=True)
-                        except Exception as e:
-                            st.warning(f"Failed to display an image: {str(e)}")
-                st.write("---")
-        else:
-            st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
+            if images:
+                st.subheader("Associated Images:")
+                for i, img in enumerate(images):
+                    st.image(img, caption=f"Image {i+1}", use_column_width=True)
 
-st.sidebar.title("How to use PropulsionPro")
-st.sidebar.markdown("""
-1. Upload a PDF manual using the file uploader.
-2. Wait for the PDF to be processed and saved to the vector database.
-3. Ask a question about marine engine maintenance in the text input field.
-4. Review the AI-generated response and relevant sections from the manual.
-
-Note: If Qdrant is not available, some features may be limited.
-""")
+if __name__ == "__main__":
+    main()
