@@ -159,6 +159,40 @@ def process_pdf_in_background(pdf_file):
     processed_doc = processor.process_document()
     save_to_qdrant(processed_doc, uploaded_file.name)
 
+def semantic_search(query, top_k=5):
+    if qdrant_client is None:
+        st.warning("Qdrant is not available. Search functionality is limited.")
+        return []
+
+    query_vector = TfidfVectorizer().fit_transform([query]).toarray()[0]
+    try:
+        search_result = qdrant_client.search(
+            collection_name="manual_vectors",
+            query_vector=query_vector.tolist(),
+            limit=top_k
+        )
+        return search_result
+    except Exception as e:
+        st.error(f"Failed to perform search in Qdrant: {str(e)}")
+        return []
+
+def generate_response(query, context, images):
+    try:
+        image_descriptions = [f"[Image {i+1}]" for i in range(len(images))]
+        context_with_images = f"{context}\n\nAvailable images: {', '.join(image_descriptions)}"
+        
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that answers questions about marine engine maintenance procedures. Use the provided images in your explanation by referring to them as [Image X]."},
+                {"role": "user", "content": f"Context:\n{context_with_images}\n\nQuestion: {query}"}
+            ]
+        )
+        return response.choices[0].message['content']
+    except Exception as e:
+        st.error(f"Failed to generate response: {str(e)}")
+        return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
+
 # Streamlit UI
 st.title('PropulsionPro: Marine Engine Maintenance Assistant')
 
