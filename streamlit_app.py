@@ -15,16 +15,12 @@ import openai
 import base64
 import threading
 
-# Disable file watcher
-os.environ['STREAMLIT_SERVER_ENABLE_STATIC_SERVING'] = 'false'
-
 # Streamlit configuration
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
 
 class DocumentProcessor:
-    def __init__(self, text, images):
+    def __init__(self, text):
         self.text = text
-        self.images = images
         self.vectorizer = SentenceTransformer('all-MiniLM-L6-v2')
 
     def extract_sections(self):
@@ -46,14 +42,14 @@ class DocumentProcessor:
     def vectorize_text(self, text):
         try:
             vector = self.vectorizer.encode(text)
-            return vector.tolist()
+            return vector.toarray()[0]
         except Exception as e:
             st.error(f"Vectorization failed: {str(e)}")
-            return [0] * 384  # Return a default vector of zeros in case of failure
+            return np.zeros(384)  # Return a default vector of zeros in case of failure
 
-    def process_section(self, section, index):
+    def process_section(self, section):
         title_match = re.match(r'(\d{3}-\d+\..*?)\n', section)
-        title = title_match.group(1) if title_match else f"Untitled Section {index}"
+        title = title_match.group(1) if title_match else "Untitled Section"
         content = section[len(title):].strip() if title_match else section
 
         tables = self.extract_data_tables(content)
@@ -61,23 +57,18 @@ class DocumentProcessor:
         image_descriptions = self.identify_image_descriptions(content)
         vector = self.vectorize_text(content)
 
-        # Assign an image to this section if available
-        image = self.images[index] if index < len(self.images) else None
-        image_data = image_to_base64(image) if image else None
-
         return {
             "title": title,
             "content": content,
             "tables": tables,
             "procedures": procedures,
             "image_descriptions": image_descriptions,
-            "vector": vector,
-            "image": image_data
+            "vector": vector.tolist()
         }
 
     def process_document(self):
         sections = self.extract_sections()
-        processed_sections = [self.process_section(section, i) for i, section in enumerate(sections)]
+        processed_sections = [self.process_section(section) for section in sections]
         return processed_sections
 
 def extract_text_from_pdf(pdf_file, max_pages=5):
@@ -96,13 +87,6 @@ def extract_images_from_pdf(pdf_file, max_images=5):
     except Exception as e:
         st.warning(f"Image extraction failed: {str(e)}")
         return []
-
-def image_to_base64(image):
-    if image is None:
-        return None
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
 
 def get_api_key():
     if 'openai' in st.secrets:
@@ -154,7 +138,9 @@ def save_to_qdrant(processed_doc, file_name):
                 "title": section['title'],
                 "content": section['content'],
                 "file_name": file_name,
-                "image": section['image']
+                "images": [
+                    base64.b64encode(image.tobytes()).decode() for image in section.get('images', [])
+                ]
             }
         )
         points.append(point)
@@ -172,9 +158,11 @@ def save_to_qdrant(processed_doc, file_name):
 def process_pdf_in_background(pdf_file):
     pdf_text = extract_text_from_pdf(pdf_file)
     pdf_images = extract_images_from_pdf(pdf_file)
-    processor = DocumentProcessor(pdf_text, pdf_images)
+    processor = DocumentProcessor(pdf_text)
     processed_doc = processor.process_document()
-    save_to_qdrant(processed_doc, pdf_file.name)
+    for section in processed_doc:
+        section['images'] = pdf_images  # Add images to each section
+    save_to_qdrant(processed_doc, uploaded_file.name)
 
 sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -183,11 +171,11 @@ def semantic_search(query, top_k=5):
         st.warning("Qdrant is not available. Search functionality is limited.")
         return []
 
-    query_vector = sentence_transformer.encode(query).tolist()
+    query_vector = sentence_transformer.encode(query)
     try:
         search_result = qdrant_client.search(
             collection_name="manual_vectors",
-            query_vector=query_vector,
+            query_vector=query_vector.tolist(),
             limit=top_k
         )
         return search_result
@@ -212,63 +200,70 @@ def generate_response(query, context, images):
         st.error(f"Failed to generate response: {str(e)}")
         return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
 
-def main():
-    st.title('PropulsionPro: Marine Engine Maintenance Assistant')
+# Streamlit UI
+st.title('PropulsionPro: Marine Engine Maintenance Assistant')
 
-    if qdrant_client:
-        st.sidebar.success("Connected to Qdrant")
-    else:
-        st.sidebar.error("Not connected to Qdrant. Some features may be limited.")
+if qdrant_client:
+    st.sidebar.success("Connected to Qdrant")
+else:
+    st.sidebar.error("Not connected to Qdrant. Some features may be limited.")
 
-    uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
 
-    if uploaded_file is not None:
-        st.success("File uploaded successfully!")
-        with st.spinner("Processing PDF..."):
-            pdf_file = BytesIO(uploaded_file.getvalue())
-            # Run processing in a separate thread to avoid blocking the UI
-            thread = threading.Thread(target=process_pdf_in_background, args=(pdf_file,))
-            thread.start()
+if uploaded_file is not None:
+    st.success("File uploaded successfully!")
+    with st.spinner("Processing PDF..."):
+        pdf_file = BytesIO(uploaded_file.getvalue())
+        # Run processing in a separate thread to avoid blocking the UI
+        thread = threading.Thread(target=process_pdf_in_background, args=(pdf_file,))
+        thread.start()
+        thread.join()
 
-    user_query = st.text_input("Ask a question about marine engine maintenance:")
+    
+user_query = st.text_input("Ask a question about marine engine maintenance:")
 
-    if user_query:
-        with st.spinner("Searching for relevant information..."):
-            search_results = semantic_search(user_query)
-            if search_results:
-                context = "\n".join([result.payload['content'] for result in search_results])
-                images = [Image.open(BytesIO(base64.b64decode(result.payload['image']))) for result in search_results if result.payload.get('image')]
-                response = generate_response(user_query, context, images)
+if user_query:
+    with st.spinner("Searching for relevant information..."):
+        search_results = semantic_search(user_query)
+        if search_results:
+            images = []
+            for result in search_results:
+                if 'images' in result.payload:
+                    for img_base64 in result.payload['images']:
+                        try:
+                            img = Image.open(BytesIO(base64.b64decode(img_base64)))
+                            images.append(img)
+                        except Exception as e:
+                            st.warning(f"Failed to load an image: {str(e)}")
+            context = "
+".join([result.payload['content'] for result in search_results])
+            response = generate_response(user_query, context, images)
 
-                st.subheader("Response:")
-                st.write(response)
+            st.subheader("Response:")
+            st.write(response)
 
-                if images:
-                    st.subheader("Relevant Images:")
-                    for i, img in enumerate(images):
-                        st.image(img, caption=f"Image {i+1}", use_column_width=True)
+            st.subheader("Relevant Sections:")
+            for result in search_results:
+                st.write(f"From: {result.payload['file_name']}")
+                st.write(f"Section: {result.payload['title']}")
+                st.write(result.payload['content'][:500] + "...")
+                if 'images' in result.payload:
+                    for img_base64 in result.payload['images']:
+                        try:
+                            img = Image.open(BytesIO(base64.b64decode(img_base64)))
+                            st.image(img, caption=f"Image from section {result.payload['title']}", use_column_width=True)
+                        except Exception as e:
+                            st.warning(f"Failed to display an image: {str(e)}")
+                st.write("---")
+        else:
+            st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
 
-                st.subheader("Relevant Sections:")
-                for result in search_results:
-                    st.write(f"From: {result.payload['file_name']}")
-                    st.write(f"Section: {result.payload['title']}")
-                    st.write(result.payload['content'][:500] + "...")
-                    st.write("---")
-            else:
-                st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
+st.sidebar.title("How to use PropulsionPro")
+st.sidebar.markdown("""
+1. Upload a PDF manual using the file uploader.
+2. Wait for the PDF to be processed and saved to the vector database.
+3. Ask a question about marine engine maintenance in the text input field.
+4. Review the AI-generated response and relevant sections from the manual.
 
-    st.sidebar.title("How to use PropulsionPro")
-    st.sidebar.markdown("""
-    1. Upload a PDF manual using the file uploader.
-    2. Wait for the PDF to be processed and saved to the vector database.
-    3. Ask a question about marine engine maintenance in the text input field.
-    4. Review the AI-generated response, relevant images, and sections from the manual.
-
-    Note: If Qdrant is not available, some features may be limited.
-    """)
-
-    if st.button("Refresh App"):
-        st.experimental_rerun()
-
-if __name__ == "__main__":
-    main()
+Note: If Qdrant is not available, some features may be limited.
+""")
