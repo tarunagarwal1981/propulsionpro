@@ -36,7 +36,7 @@ except ValueError as e:
 
 def generate_response(query, context, images):
     try:
-        image_descriptions = [f"[Image {i+1}]" for i in range(len(images))]
+        image_descriptions = [f"[Image {i+1}: {img['description']}]" for i, img in enumerate(images)]
         context_with_images = f"{context}\n\nAvailable images: {', '.join(image_descriptions)}"
         
         response = openai.ChatCompletion.create(
@@ -53,17 +53,14 @@ def generate_response(query, context, images):
 
 def fetch_context_and_images(query, top_k=5):
     try:
-        # Encode the query using the SentenceTransformer model
         query_vector = sentence_transformer.encode(query).tolist()
         
-        # Search the Qdrant vector database
         search_result = qdrant_client.search(
             collection_name="manual_vectors",
             query_vector=query_vector,
             limit=top_k
         )
         
-        # Extract context and images from search results
         context = "\n".join([result.payload['content'] for result in search_result if 'content' in result.payload])
         images = [
             {
@@ -96,9 +93,7 @@ def main():
                 if images:
                     st.subheader("Associated Images:")
                     for i, img_data in enumerate(images):
-                        st.image(img_data['image'], caption=img_data['description'], use_column_width=True)
-                        # Explicitly include the image reference in the response
-                        st.write(f"Refer to: {img_data['description']}")
+                        st.image(img_data['image'], caption=f"Image {i+1}: {img_data['description']}", use_column_width=True)
 
 if __name__ == "__main__":
     main()
