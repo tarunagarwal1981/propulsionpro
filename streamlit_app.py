@@ -66,8 +66,11 @@ def fetch_context_and_images(query, top_k=5):
         # Extract context and images from search results
         context = "\n".join([result.payload['content'] for result in search_result if 'content' in result.payload])
         images = [
-            Image.open(BytesIO(base64.b64decode(result.payload['image'])))
-            for result in search_result if result.payload.get('image')
+            {
+                'image': Image.open(BytesIO(base64.b64decode(result.payload['image']))),
+                'description': result.payload.get('description', f"Image {i+1}")
+            }
+            for i, result in enumerate(search_result) if result.payload.get('image')
         ]
         return context, images
     except Exception as e:
@@ -92,9 +95,8 @@ def main():
 
                 if images:
                     st.subheader("Associated Images:")
-                    for i, img in enumerate(images):
-                        st.image(img, caption=f"Image {i+1}", use_column_width=True)
+                    for i, img_data in enumerate(images):
+                        st.image(img_data['image'], caption=img_data['description'], use_column_width=True)
 
 if __name__ == "__main__":
     main()
-    
