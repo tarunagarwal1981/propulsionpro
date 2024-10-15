@@ -82,15 +82,19 @@ def main():
     if user_query:
         with st.spinner("Fetching relevant information..."):
             context, images = fetch_context_and_images(user_query)
-            response = generate_response(user_query, context, images)
+            if not context and not images:
+                st.warning("No relevant information or images found.")
+            else:
+                response = generate_response(user_query, context, images)
 
-            st.subheader("Response:")
-            st.write(response)
+                st.subheader("Response:")
+                st.write(response)
 
-            if images:
-                st.subheader("Associated Images:")
-                for i, img in enumerate(images):
-                    st.image(img, caption=f"Image {i+1}", use_column_width=True)
+                if images:
+                    st.subheader("Associated Images:")
+                    for i, img in enumerate(images):
+                        st.image(img, caption=f"Image {i+1}", use_column_width=True)
 
 if __name__ == "__main__":
     main()
+    
