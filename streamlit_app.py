@@ -138,7 +138,9 @@ def save_to_qdrant(processed_doc, file_name):
                 "title": section['title'],
                 "content": section['content'],
                 "file_name": file_name,
-                "images": []  # No images as they are not displayed
+                "images": [
+                    base64.b64encode(image.tobytes()).decode() for image in section.get('images', [])
+                ]
             }
         )
         points.append(point)
@@ -155,8 +157,11 @@ def save_to_qdrant(processed_doc, file_name):
 
 def process_pdf_in_background(pdf_file):
     pdf_text = extract_text_from_pdf(pdf_file)
+    pdf_images = extract_images_from_pdf(pdf_file)
     processor = DocumentProcessor(pdf_text)
     processed_doc = processor.process_document()
+    for section in processed_doc:
+        section['images'] = pdf_images  # Add images to each section
     save_to_qdrant(processed_doc, uploaded_file.name)
 
 sentence_transformer = SentenceTransformer('all-MiniLM-L6-v2')
@@ -221,8 +226,18 @@ if user_query:
     with st.spinner("Searching for relevant information..."):
         search_results = semantic_search(user_query)
         if search_results:
-            context = "\n".join([result.payload['content'] for result in search_results])
-            response = generate_response(user_query, context, [])
+            images = []
+            for result in search_results:
+                if 'images' in result.payload:
+                    for img_base64 in result.payload['images']:
+                        try:
+                            img = Image.open(BytesIO(base64.b64decode(img_base64)))
+                            images.append(img)
+                        except Exception as e:
+                            st.warning(f"Failed to load an image: {str(e)}")
+            context = "
+".join([result.payload['content'] for result in search_results])
+            response = generate_response(user_query, context, images)
 
             st.subheader("Response:")
             st.write(response)
@@ -232,6 +247,13 @@ if user_query:
                 st.write(f"From: {result.payload['file_name']}")
                 st.write(f"Section: {result.payload['title']}")
                 st.write(result.payload['content'][:500] + "...")
+                if 'images' in result.payload:
+                    for img_base64 in result.payload['images']:
+                        try:
+                            img = Image.open(BytesIO(base64.b64decode(img_base64)))
+                            st.image(img, caption=f"Image from section {result.payload['title']}", use_column_width=True)
+                        except Exception as e:
+                            st.warning(f"Failed to display an image: {str(e)}")
                 st.write("---")
         else:
             st.warning("No relevant information found. This could be due to Qdrant connection issues or lack of matching content.")
