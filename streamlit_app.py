@@ -1,3 +1,117 @@
+import streamlit as st
+import re
+import json
+import PyPDF2
+from pdf2image import convert_from_bytes
+from io import BytesIO
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct, VectorParams, Distance
+import uuid
+import os
+import openai
+import base64
+
+# Streamlit configuration
+st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
+
+class DocumentProcessor:
+    def __init__(self, text):
+        self.text = text
+        self.vectorizer = TfidfVectorizer()
+
+    def extract_sections(self):
+        sections = re.split(r'\n(?=\d{3}-\d+\.)', self.text)
+        return [section.strip() for section in sections if section.strip()]
+
+    def extract_data_tables(self, text):
+        tables = re.findall(r'(D\d+-\d+.*?(?:\n.*?)+)', text)
+        return tables
+
+    def extract_procedures(self, text):
+        procedures = re.findall(r'(\d+\.\s.*?(?:\n(?!\d+\.).+)*)', text, re.DOTALL)
+        return procedures
+
+    def identify_image_descriptions(self, text):
+        image_desc = re.findall(r'(Figure \d+:.*?(?:\n(?!Figure \d+:).+)*)', text, re.DOTALL)
+        return image_desc
+
+    def vectorize_text(self, text):
+        vector = self.vectorizer.fit_transform([text])
+        return vector.toarray()[0]
+
+    def process_section(self, section):
+        title_match = re.match(r'(\d{3}-\d+\..*?)\n', section)
+        title = title_match.group(1) if title_match else "Untitled Section"
+        content = section[len(title):].strip() if title_match else section
+
+        tables = self.extract_data_tables(content)
+        procedures = self.extract_procedures(content)
+        image_descriptions = self.identify_image_descriptions(content)
+        vector = self.vectorize_text(content)
+
+        return {
+            "title": title,
+            "content": content,
+            "tables": tables,
+            "procedures": procedures,
+            "image_descriptions": image_descriptions,
+            "vector": vector.tolist()
+        }
+
+    def process_document(self):
+        sections = self.extract_sections()
+        processed_sections = [self.process_section(section) for section in sections]
+        return processed_sections
+
+def extract_text_from_pdf(pdf_file):
+    pdf_reader = PyPDF2.PdfReader(pdf_file)
+    text = ""
+    for page in pdf_reader.pages:
+        text += page.extract_text() + "\n"
+    return text
+
+def extract_images_from_pdf(pdf_file):
+    # Assuming Poppler is installed in the default location on Linux
+    images = convert_from_bytes(pdf_file.getvalue(), poppler_path='/usr/bin')
+    return images
+
+def image_to_base64(image):
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
+def save_to_json(data):
+    class NumpyEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, Image.Image):
+                return image_to_base64(obj)
+            return json.JSONEncoder.default(self, obj)
+
+    return json.dumps(data, cls=NumpyEncoder, indent=2)
+
+def visualize_sections(processed_doc):
+    section_lengths = [len(section['content']) for section in processed_doc]
+    section_titles = [section['title'] for section in processed_doc]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.bar(section_titles, section_lengths)
+    ax.set_title('Section Lengths')
+    ax.set_xlabel('Sections')
+    ax.set_ylabel('Character Count')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    st.pyplot(fig)
+
+def display_images(images):
+    for i, image in enumerate(images):
+        st.image(image, caption=f"Image {i+1}", use_column_width=True)
+
 def get_api_key():
     if 'openai' in st.secrets:
         return st.secrets['openai']['api_key']
@@ -121,8 +235,17 @@ if uploaded_file is not None:
     st.subheader("Document Structure")
     visualize_sections(processed_doc)
 
-    
-    
+    st.subheader("Extracted Images")
+    display_images(pdf_images)
+
+    json_str = save_to_json(processed_doc)
+    st.download_button(
+        label="Download processed document as JSON",
+        data=json_str,
+        file_name="processed_document.json",
+        mime="application/json"
+    )
+
 user_query = st.text_input("Ask a question about marine engine maintenance:")
 
 if user_query:
@@ -145,7 +268,10 @@ if user_query:
             st.subheader("Response:")
             st.write(response)
 
-            
+            if images:
+                st.subheader("Relevant Images:")
+                display_images(images)
+
             st.subheader("Relevant Sections:")
             for result in search_results:
                 st.write(f"From: {result.payload['file_name']}")
