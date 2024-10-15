@@ -62,13 +62,18 @@ def fetch_context_and_images(query, top_k=5):
         )
         
         context = "\n".join([result.payload['content'] for result in search_result if 'content' in result.payload])
-        images = [
-            {
-                'image': Image.open(BytesIO(base64.b64decode(result.payload['image']))),
-                'description': result.payload.get('description', f"Image {i+1}")
-            }
-            for i, result in enumerate(search_result) if result.payload.get('image')
-        ]
+        images = []
+        for i, result in enumerate(search_result):
+            if 'image' in result.payload:
+                try:
+                    image_data = base64.b64decode(result.payload['image'])
+                    image = Image.open(BytesIO(image_data))
+                    images.append({
+                        'image': image,
+                        'description': result.payload.get('description', f"Image {i+1}")
+                    })
+                except Exception as e:
+                    st.error(f"Failed to process image {i+1}: {str(e)}")
         return context, images
     except Exception as e:
         st.error(f"Failed to fetch context and images from Qdrant: {str(e)}")
@@ -89,14 +94,19 @@ def main():
 
                 st.subheader("Maintenance Instructions:")
                 
+                # Display debugging information
+                st.write(f"Number of images fetched: {len(images)}")
+                for i, img in enumerate(images):
+                    st.write(f"Image {i+1} description: {img['description']}")
+                
                 # Split the response into paragraphs
                 paragraphs = response.split('\n\n')
                 for paragraph in paragraphs:
-                    # Check if the paragraph mentions an image
-                    image_matches = re.findall(r'\[Image (\d+)', paragraph)
-                    
                     # Display the paragraph text
                     st.write(paragraph)
+                    
+                    # Check if the paragraph mentions an image
+                    image_matches = re.findall(r'\[Image (\d+)', paragraph)
                     
                     # Display mentioned images
                     if image_matches:
@@ -108,6 +118,17 @@ def main():
                                     st.image(images[image_index]['image'], 
                                              caption=f"Image {image_index + 1}: {images[image_index]['description']}", 
                                              use_column_width=True)
+                                    
+                                    # Attempt to display image using base64 encoding
+                                    img_base64 = base64.b64encode(images[image_index]['image'].tobytes()).decode()
+                                    st.markdown(f'<img src="data:image/png;base64,{img_base64}" alt="Image {image_index + 1}" style="width:100%">', unsafe_allow_html=True)
+                            else:
+                                st.warning(f"Image {image_index + 1} not found in fetched data.")
+                
+                # Display all fetched images
+                st.subheader("All Fetched Images:")
+                for i, img in enumerate(images):
+                    st.image(img['image'], caption=f"Image {i+1}: {img['description']}", use_column_width=True)
                 
                 # Feedback mechanism
                 st.subheader("Was this response helpful?")
