@@ -4,7 +4,7 @@ import json
 import PyPDF2
 from pdf2image import convert_from_bytes
 from io import BytesIO
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sentence_transformers import SentenceTransformer
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -21,7 +21,7 @@ st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
 class DocumentProcessor:
     def __init__(self, text):
         self.text = text
-        self.vectorizer = TfidfVectorizer()
+        self.vectorizer = SentenceTransformer('all-MiniLM-L6-v2')
 
     def extract_sections(self):
         sections = re.split(r'\n(?=\d{3}-\d+\.)', self.text)
@@ -41,7 +41,7 @@ class DocumentProcessor:
 
     def vectorize_text(self, text):
         try:
-            vector = self.vectorizer.fit_transform([text])
+            vector = self.vectorizer.encode(text)
             return vector.toarray()[0]
         except Exception as e:
             st.error(f"Vectorization failed: {str(e)}")
@@ -160,7 +160,7 @@ def process_pdf_in_background(pdf_file):
     save_to_qdrant(processed_doc, uploaded_file.name)
 
 def semantic_search(query, top_k=10):
-    query_vector = TfidfVectorizer().fit_transform([query]).toarray()[0]
+    query_vector = self.vectorizer.encode(query)
     try:
         results = qdrant_client.search(
             collection_name="manual_vectors",
