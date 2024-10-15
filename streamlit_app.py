@@ -2,9 +2,9 @@ import streamlit as st
 import re
 import json
 import PyPDF2
-import fitz  # PyMuPDF
+from pdf2image import convert_from_bytes
 from io import BytesIO
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -18,16 +18,10 @@ import base64
 # Streamlit configuration
 st.set_page_config(page_title="PropulsionPro", page_icon="🚢", layout="wide")
 
-@st.cache_resource
-def load_sentence_transformer():
-    return SentenceTransformer('all-MiniLM-L6-v2')
-
-sentence_transformer = load_sentence_transformer()
-
 class DocumentProcessor:
-    def __init__(self, text, images):
+    def __init__(self, text):
         self.text = text
-        self.images = images
+        self.vectorizer = TfidfVectorizer()
 
     def extract_sections(self):
         sections = re.split(r'\n(?=\d{3}-\d+\.)', self.text)
@@ -46,11 +40,12 @@ class DocumentProcessor:
         return image_desc
 
     def vectorize_text(self, text):
-        return sentence_transformer.encode(text).tolist()
+        vector = self.vectorizer.fit_transform([text])
+        return vector.toarray()[0]
 
-    def process_section(self, section, section_index):
+    def process_section(self, section):
         title_match = re.match(r'(\d{3}-\d+\..*?)\n', section)
-        title = title_match.group(1) if title_match else f"Untitled Section {section_index}"
+        title = title_match.group(1) if title_match else "Untitled Section"
         content = section[len(title):].strip() if title_match else section
 
         tables = self.extract_data_tables(content)
@@ -58,22 +53,18 @@ class DocumentProcessor:
         image_descriptions = self.identify_image_descriptions(content)
         vector = self.vectorize_text(content)
 
-        # Assign images to sections based on their order
-        section_images = self.images[section_index:section_index+1] if section_index < len(self.images) else []
-
         return {
             "title": title,
             "content": content,
             "tables": tables,
             "procedures": procedures,
             "image_descriptions": image_descriptions,
-            "vector": vector,
-            "images": section_images
+            "vector": vector.tolist()
         }
 
     def process_document(self):
         sections = self.extract_sections()
-        processed_sections = [self.process_section(section, i) for i, section in enumerate(sections)]
+        processed_sections = [self.process_section(section) for section in sections]
         return processed_sections
 
 def extract_text_from_pdf(pdf_file):
@@ -84,17 +75,7 @@ def extract_text_from_pdf(pdf_file):
     return text
 
 def extract_images_from_pdf(pdf_file):
-    pdf_document = fitz.open(stream=pdf_file.getvalue(), filetype="pdf")
-    images = []
-    for page_num in range(len(pdf_document)):
-        page = pdf_document[page_num]
-        image_list = page.get_images(full=True)
-        for img_index, img in enumerate(image_list):
-            xref = img[0]
-            base_image = pdf_document.extract_image(xref)
-            image_bytes = base_image["image"]
-            image = Image.open(BytesIO(image_bytes))
-            images.append(image)
+    images = convert_from_bytes(pdf_file.getvalue())
     return images
 
 def image_to_base64(image):
@@ -177,7 +158,7 @@ def save_to_qdrant(processed_doc, file_name):
                 "title": section['title'],
                 "content": section['content'],
                 "file_name": file_name,
-                "images": [image_to_base64(img) for img in section['images']]
+                "images": [image_to_base64(img) for img in section['images']] if 'images' in section else []
             }
         )
         points.append(point)
@@ -197,11 +178,11 @@ def semantic_search(query, top_k=5):
         st.warning("Qdrant is not available. Search functionality is limited.")
         return []
 
-    query_vector = sentence_transformer.encode(query).tolist()
+    query_vector = TfidfVectorizer().fit_transform([query]).toarray()[0]
     try:
         search_result = qdrant_client.search(
             collection_name="manual_vectors",
-            query_vector=query_vector,
+            query_vector=query_vector.tolist(),
             limit=top_k
         )
         return search_result
@@ -245,7 +226,7 @@ if uploaded_file is not None:
         pdf_text = extract_text_from_pdf(pdf_file)
         pdf_images = extract_images_from_pdf(pdf_file)
 
-        processor = DocumentProcessor(pdf_text, pdf_images)
+        processor = DocumentProcessor(pdf_text)
         processed_doc = processor.process_document()
 
         save_to_qdrant(processed_doc, uploaded_file.name)
