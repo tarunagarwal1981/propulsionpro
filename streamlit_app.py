@@ -75,7 +75,8 @@ def extract_text_from_pdf(pdf_file):
     return text
 
 def extract_images_from_pdf(pdf_file):
-    images = convert_from_bytes(pdf_file.getvalue())
+    # Assuming Poppler is installed in the default location on Linux
+    images = convert_from_bytes(pdf_file.getvalue(), poppler_path='/usr/bin')
     return images
 
 def image_to_base64(image):
