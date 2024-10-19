@@ -1,186 +1,188 @@
 import streamlit as st
-import openai
-import base64
+import fitz  # PyMuPDF
+import io
+from minio import Minio
+from minio.error import S3Error
 from PIL import Image
-from io import BytesIO
-import os
-from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.models import PointStruct, VectorParams
 import re
+import uuid
+import cv2
 import numpy as np
-import tiktoken
 
-# Streamlit configuration
-st.set_page_config(page_title="Engine Maintenance Assistant", page_icon="🔧", layout="wide")
+# Load the embedding model (cached to avoid reloading on every app refresh)
+@st.cache_resource
+def load_model():
+    return SentenceTransformer('all-MiniLM-L6-v2')
+
+model = load_model()
+
+# Initialize MinIO client for Cloudflare R2
+def initialize_minio():
+    try:
+        return Minio(
+            st.secrets["R2_ENDPOINT"].replace("https://", ""),
+            access_key=st.secrets["R2_ACCESS_KEY"],
+            secret_key=st.secrets["R2_SECRET_KEY"],
+            secure=True
+        )
+    except KeyError as e:
+        st.error(f"MinIO initialization failed: Missing secret key {e}")
+        return None
+
+minio_client = initialize_minio()
 
 # Initialize Qdrant client
 qdrant_client = QdrantClient(
-    url=st.secrets.get("qdrant", {}).get("url", ""),
-    api_key=st.secrets.get("qdrant", {}).get("api_key", "")
+    url=st.secrets["qdrant"]["url"],
+    api_key=st.secrets["qdrant"]["api_key"]
 )
 
-# Load the SentenceTransformer models
-sentence_transformer_384 = SentenceTransformer('all-MiniLM-L6-v2')
-sentence_transformer_768 = SentenceTransformer('sentence-transformers/stsb-xlm-r-multilingual')
-
-# Initialize tokenizer
-tokenizer = tiktoken.get_encoding("cl100k_base")
-
-def get_api_key():
-    if 'openai' in st.secrets:
-        return st.secrets['openai']['api_key']
-    api_key = os.getenv('OPENAI_API_KEY')
-    if api_key is None:
-        raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
-    return api_key
-
-try:
-    openai.api_key = get_api_key()
-except ValueError as e:
-    st.error(str(e))
-    st.stop()
-
-def truncate_context(context, max_tokens=10000):
-    tokens = tokenizer.encode(context)
-    if len(tokens) > max_tokens:
-        truncated_tokens = tokens[:max_tokens]
-        return tokenizer.decode(truncated_tokens)
-    return context
-
-def generate_response(query, context, images):
+# Function to recreate the Qdrant collection
+def recreate_qdrant_collection():
     try:
-        image_descriptions = [f"[Image {i+1}: {img['description']}]" for i, img in enumerate(images)]
-        context_with_images = f"{context}\n\nAvailable images: {', '.join(image_descriptions)}"
-        
-        # Truncate context if it's too long
-        truncated_context = truncate_context(context_with_images)
-        
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are a helpful assistant that answers questions about engine maintenance. Use the provided images in your explanation by referring to them as [Image X]. Provide step-by-step instructions when applicable."},
-                {"role": "user", "content": f"Context:\n{truncated_context}\n\nQuestion: {query}"}
-            ]
-        )
-        return response.choices[0].message['content']
+        qdrant_client.delete_collection(collection_name="manual_vectors")
     except Exception as e:
-        st.error(f"Failed to generate response: {str(e)}")
-        return "I'm sorry, but I couldn't generate a response at this time. Please try again later."
+        st.warning(f"Failed to delete existing collection: {e}")
 
-def create_1000dim_vector(query):
-    vector_768 = sentence_transformer_768.encode(query)
-    additional_dims = np.random.rand(232)
-    vector_1000 = np.concatenate([vector_768, additional_dims])
-    vector_1000 = vector_1000 / np.linalg.norm(vector_1000)
-    return vector_1000.tolist()
+    qdrant_client.create_collection(
+        collection_name="manual_vectors",
+        vectors_config=VectorParams(
+            size=384,
+            distance="Cosine"
+        )
+    )
 
-def fetch_context_and_images(query, collection_name, top_k=5):
+def extract_images_from_page(page, page_num):
+    # Render the page at a higher resolution
+    zoom = 2  # Increase this for higher resolution
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    
+    # Convert to numpy array and process
+    img_np = np.array(img)
+    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+    
+    # Threshold to separate text from graphics
+    _, binary = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
+    
+    # Find contours
+    contours, _ = cv2.findContours(255 - binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    images = []
+    for i, contour in enumerate(contours):
+        x, y, w, h = cv2.boundingRect(contour)
+        if w > 100 and h > 100:  # Filter out small contours
+            roi = img_np[y:y+h, x:x+w]
+            pil_img = Image.fromarray(roi)
+            images.append((f"Page {page_num + 1}, Image {i + 1}", pil_img, (x, y, w, h)))
+    
+    return images
+
+def vectorize_pdfs():
+    if not minio_client:
+        st.error("MinIO client not initialized.")
+        return
+    
     try:
-        if collection_name == "manual_vectors":
-            query_vector = sentence_transformer_384.encode(query).tolist()
-        elif collection_name == "document_sections":
-            query_vector = create_1000dim_vector(query)
-        else:
-            raise ValueError(f"Unknown collection name: {collection_name}")
-        
-        search_result = qdrant_client.search(
-            collection_name=collection_name,
-            query_vector=query_vector,
-            limit=top_k
-        )
-        
-        context = "\n".join([result.payload['content'] for result in search_result if 'content' in result.payload])
-        images = []
-        for i, result in enumerate(search_result):
-            if 'image' in result.payload:
-                try:
-                    image_data = base64.b64decode(result.payload['image'])
-                    image = Image.open(BytesIO(image_data))
-                    images.append({
-                        'image': image,
-                        'description': result.payload.get('description', f"Image {i+1}")
-                    })
-                except Exception as e:
-                    st.error(f"Failed to process image {i+1} from {collection_name}: {str(e)}")
-        return context, images
-    except Exception as e:
-        st.error(f"Failed to fetch context and images from {collection_name}: {str(e)}")
-        return "", []
+        objects = minio_client.list_objects(st.secrets["R2_BUCKET_NAME"], recursive=True)
+        pdf_file_names = [obj.object_name for obj in objects if obj.object_name.endswith('.pdf')]
+    except S3Error as e:
+        st.error(f"Error listing PDF files from Cloudflare R2: {e}")
+        return
 
-def display_results(response, images, collection_name):
-    st.subheader(f"Results from {collection_name}")
-    
-    # Display debugging information
-    st.write(f"Number of images fetched: {len(images)}")
-    for i, img in enumerate(images):
-        st.write(f"Image {i+1} description: {img['description']}")
-    
-    # Split the response into paragraphs
-    paragraphs = response.split('\n\n')
-    for paragraph in paragraphs:
-        # Display the paragraph text
-        st.write(paragraph)
-        
-        # Check if the paragraph mentions an image
-        image_matches = re.findall(r'\[Image (\d+)', paragraph)
-        
-        # Display mentioned images
-        if image_matches:
-            cols = st.columns(len(image_matches))
-            for i, match in enumerate(image_matches):
-                image_index = int(match) - 1
-                if image_index < len(images):
-                    with cols[i]:
-                        st.image(images[image_index]['image'], 
-                                 caption=f"Image {image_index + 1}: {images[image_index]['description']}", 
-                                 use_column_width=True)
-                else:
-                    st.warning(f"Image {image_index + 1} not found in fetched data.")
-    
-    # Display all fetched images that weren't shown inline
-    st.subheader(f"Additional Images from {collection_name}:")
-    unused_images = [img for i, img in enumerate(images) if f"[Image {i+1}]" not in response]
-    if unused_images:
-        for i, img in enumerate(unused_images):
-            st.image(img['image'], caption=f"Additional Image {i+1}: {img['description']}", use_column_width=True)
-    else:
-        st.write("No additional images.")
+    vectors = []
 
-def main():
-    st.title('Engine Maintenance Assistant')
+    for pdf_file_name in pdf_file_names:
+        try:
+            response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
+            pdf_content = response.read()
+            doc = fitz.open(stream=pdf_content, filetype="pdf")
 
-    user_query = st.text_input("Enter your maintenance query:")
-
-    if user_query:
-        with st.spinner("Fetching relevant information..."):
-            # Fetch from manual_vectors
-            context_manual, images_manual = fetch_context_and_images(user_query, "manual_vectors")
-            response_manual = generate_response(user_query, context_manual, images_manual)
-            
-            # Fetch from document_sections
-            context_doc, images_doc = fetch_context_and_images(user_query, "document_sections")
-            response_doc = generate_response(user_query, context_doc, images_doc)
-
-            if not (context_manual or images_manual) and not (context_doc or images_doc):
-                st.warning("No relevant information or images found in either collection.")
-            else:
-                # Display results from manual_vectors
-                display_results(response_manual, images_manual, "manual_vectors")
+            for page_num in range(len(doc)):
+                st.write(f"Processing page {page_num + 1} of {pdf_file_name}...")
+                page = doc[page_num]
                 
-                # Display results from document_sections
-                display_results(response_doc, images_doc, "document_sections")
-        
-        # Feedback mechanism
-        st.subheader("Was this response helpful?")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("👍 Yes"):
-                st.success("Thank you for your feedback!")
-        with col2:
-            if st.button("👎 No"):
-                st.text_area("Please tell us how we can improve:", key="feedback")
-                if st.button("Submit Feedback"):
-                    st.success("Thank you for your feedback! We'll use it to improve our system.")
+                # Process text
+                text = page.get_text()
+                sentences = re.split(r'(?<=[.!?])\s+', text)
+                for sentence in sentences:
+                    if len(sentence.strip()) > 0:
+                        embedding = model.encode(sentence.strip()).tolist()
+                        point_id = str(uuid.uuid4())
+                        vectors.append(PointStruct(
+                            id=point_id,
+                            vector=embedding,
+                            payload={
+                                "type": "text",
+                                "page": page_num + 1,
+                                "content": sentence.strip(),
+                                "file_name": pdf_file_name
+                            }
+                        ))
 
-if __name__ == "__main__":
-    main()
+                # Process images
+                images = extract_images_from_page(page, page_num)
+                for img_name, img, bbox in images:
+                    x, y, w, h = bbox
+                    try:
+                        # Get nearby text
+                        extended_rect = fitz.Rect(x/2, y/2, (x+w)/2, (y+h)/2).extend(50)  # Divide by 2 to account for zoom
+                        nearby_text = page.get_text("text", clip=extended_rect)
+                    except Exception:
+                        nearby_text = "No nearby text found"
+
+                    metadata_text = f"Image metadata: {nearby_text}"
+                    embedding = model.encode(metadata_text).tolist()
+                    point_id = str(uuid.uuid4())
+                    vectors.append(PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload={
+                            "type": "image",
+                            "page": page_num + 1,
+                            "content": metadata_text,
+                            "file_name": pdf_file_name,
+                            "image_name": img_name
+                        }
+                    ))
+
+            doc.close()
+
+        except S3Error as e:
+            st.error(f"Error downloading file {pdf_file_name} from Cloudflare R2: {e}")
+        except Exception as e:
+            st.error(f"Error processing file {pdf_file_name}: {e}")
+
+    recreate_qdrant_collection()
+
+    batch_size = 100
+    for i in range(0, len(vectors), batch_size):
+        batch = vectors[i:i + batch_size]
+        try:
+            qdrant_client.upsert(collection_name="manual_vectors", points=batch)
+        except Exception as e:
+            st.error(f"Error upserting batch {i // batch_size}: {e}")
+
+    st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
+
+# Streamlit UI
+st.title('Advanced PDF Extractor and Vectorizer')
+
+if st.button("Process PDFs from Cloudflare R2"):
+    with st.spinner("Processing PDFs from Cloudflare R2, extracting content, and saving in Qdrant..."):
+        vectorize_pdfs()
+        st.success("All PDFs have been successfully processed and vectors saved in Qdrant!")
+
+st.sidebar.markdown("""
+## How to use the system:
+1. Click the "Process PDFs from Cloudflare R2" button to start processing all available PDFs in Cloudflare R2.
+2. The system will extract text and images from each PDF using advanced image processing techniques.
+3. Text will be split into sentences and vectorized.
+4. Images will be extracted using contour detection and vectorized along with their nearby text as metadata.
+5. All vectors will be stored in Qdrant, replacing any existing vectors.
+6. You'll see a success message when the process is complete.
+""")
