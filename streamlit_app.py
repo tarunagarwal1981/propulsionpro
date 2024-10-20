@@ -11,6 +11,8 @@ import re
 import uuid
 import cv2
 import numpy as np
+import openai
+import os
 
 # Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
@@ -169,6 +171,48 @@ def vectorize_pdfs():
 
     st.success(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
 
+# Function to get the OpenAI API key
+def get_api_key():
+    """Retrieve the API key from Streamlit secrets or environment variables."""
+    if 'openai' in st.secrets:
+        return st.secrets['openai']['api_key']
+    api_key = os.getenv('OPENAI_API_KEY')
+    if api_key is None:
+        raise ValueError("API key not found. Set OPENAI_API_KEY as an environment variable.")
+    return api_key
+
+# Function to perform RAG (Retrieval-Augmented Generation)
+def rag_pipeline(question):
+    # Retrieve vectors from Qdrant that are most relevant to the question
+    query_embedding = model.encode(question).tolist()
+    search_result = qdrant_client.search(
+        collection_name="manual_vectors",
+        query_vector=query_embedding,
+        limit=5
+    )
+    
+    context = ""
+    relevant_images = []
+    for result in search_result:
+        payload = result.payload
+        if payload["type"] == "text":
+            context += payload["content"] + "\n"
+        elif payload["type"] == "image":
+            relevant_images.append(payload)
+
+    # Query the LLM (ChatGPT-3.5)
+    openai.api_key = get_api_key()
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": f"Answer the question based on the context provided:\n\nContext:\n{context}\n\nQuestion: {question}"}
+        ]
+    )
+    
+    answer = response.choices[0].message['content'].strip()
+    return answer, relevant_images
+
 # Streamlit UI
 st.title('Advanced PDF Extractor and Vectorizer')
 
@@ -186,3 +230,20 @@ st.sidebar.markdown("""
 5. All vectors will be stored in Qdrant, replacing any existing vectors.
 6. You'll see a success message when the process is complete.
 """)
+
+# RAG Pipeline User Interface
+st.title('RAG Pipeline: Question Answering')
+question = st.text_input("Enter your question:")
+if st.button("Get Answer"):
+    if question:
+        with st.spinner("Fetching answer..."):
+            answer, images = rag_pipeline(question)
+            st.write("**Answer:**", answer)
+            
+            if images:
+                st.write("**Relevant Images:**")
+                for img_data in images:
+                    img_name = img_data["image_name"]
+                    st.write(f"- {img_name}")
+    else:
+        st.error("Please enter a question.")
