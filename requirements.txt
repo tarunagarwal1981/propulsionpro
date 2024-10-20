@@ -22,3 +22,4 @@ accelerate
 matplotlib
 poppler-utils
 tiktoken
+opencv-python-headless
