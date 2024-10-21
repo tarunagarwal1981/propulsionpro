@@ -15,6 +15,7 @@ import os
 import io
 import base64
 import logging
+import random
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -112,6 +113,7 @@ def vectorize_pdfs():
         return False
 
     vectors = []
+    all_extracted_images = []
     for pdf_file_name in pdf_file_names:
         try:
             response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
@@ -167,9 +169,7 @@ def vectorize_pdfs():
                             "image_name": img_name
                         }
                     ))
-
-                    # Display the extracted image
-                    st.image(img, caption=img_name, use_column_width=True)
+                    all_extracted_images.append((img_name, img))
 
             doc.close()
 
@@ -191,6 +191,17 @@ def vectorize_pdfs():
             return False
 
     logger.info(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
+
+    # Display up to 100 randomly selected images
+    st.write(f"Total images extracted: {len(all_extracted_images)}")
+    display_images = all_extracted_images if len(all_extracted_images) <= 100 else random.sample(all_extracted_images, 100)
+    
+    st.write(f"Displaying {len(display_images)} randomly selected images:")
+    cols = st.columns(4)  # Create 4 columns for image display
+    for idx, (img_name, img) in enumerate(display_images):
+        with cols[idx % 4]:  # Distribute images across columns
+            st.image(img, caption=img_name, use_column_width=True)
+
     return True
 
 def get_api_key():
@@ -257,7 +268,7 @@ st.sidebar.markdown("""
 ## How to use the system:
 1. Click the "Process PDFs from Cloudflare R2" button to start processing all available PDFs in Cloudflare R2.
 2. The system will extract text and images from each PDF using advanced image processing techniques.
-3. Extracted images will be displayed for each page.
+3. Up to 100 randomly selected extracted images will be displayed.
 4. Text will be split into sentences and vectorized.
 5. Images will be extracted using contour detection and vectorized along with their nearby text as metadata.
 6. All vectors will be stored in Qdrant, replacing any existing vectors.
