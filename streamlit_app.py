@@ -18,6 +18,7 @@ import logging
 import random
 import gc
 import multiprocessing
+import traceback
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -118,8 +119,13 @@ def vectorize_pdfs():
         logger.error(f"Error listing PDF files from Cloudflare R2: {e}")
         return False
 
-    vectors = []
-    all_extracted_images = []
+    chunk_size = 10  # Process 10 pages at a time
+    total_vectors = 0
+    total_images = 0
+
+    if not recreate_qdrant_collection():
+        return False
+
     for pdf_file_name in pdf_file_names:
         try:
             response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
@@ -128,54 +134,78 @@ def vectorize_pdfs():
 
             st.write(f"Processing: {pdf_file_name}")
 
-            for page_num in range(len(doc)):
-                logger.info(f"Processing page {page_num + 1} of {pdf_file_name}...")
-                page = doc[page_num]
-                
-                # Process text
-                text = page.get_text()
-                sentences = re.split(r'(?<=[.!?])\s+', text)
-                for sentence in sentences:
-                    if len(sentence.strip()) > 0:
-                        embedding = model.encode(sentence.strip()).tolist()
+            for chunk_start in range(0, len(doc), chunk_size):
+                chunk_end = min(chunk_start + chunk_size, len(doc))
+                vectors = []
+                chunk_images = []
+
+                for page_num in range(chunk_start, chunk_end):
+                    logger.info(f"Processing page {page_num + 1} of {pdf_file_name}...")
+                    page = doc[page_num]
+                    
+                    # Process text
+                    text = page.get_text()
+                    sentences = re.split(r'(?<=[.!?])\s+', text)
+                    for sentence in sentences:
+                        if len(sentence.strip()) > 0:
+                            embedding = model.encode(sentence.strip()).tolist()
+                            point_id = str(uuid.uuid4())
+                            vectors.append(PointStruct(
+                                id=point_id,
+                                vector=embedding,
+                                payload={
+                                    "type": "text",
+                                    "page": page_num + 1,
+                                    "content": sentence.strip(),
+                                    "file_name": pdf_file_name
+                                }
+                            ))
+
+                    # Process images
+                    images = extract_images_from_page(page, page_num)
+                    st.write(f"Page {page_num + 1}: {len(images)} images extracted")
+                    for img_name, img, bbox in images:
+                        x, y, w, h = bbox
+                        try:
+                            extended_rect = fitz.Rect(x/2, y/2, (x+w)/2, (y+h)/2).extend(50)
+                            nearby_text = page.get_text("text", clip=extended_rect)
+                        except Exception:
+                            nearby_text = "No nearby text found"
+
+                        metadata_text = f"Image metadata: {nearby_text}"
+                        embedding = model.encode(metadata_text).tolist()
                         point_id = str(uuid.uuid4())
                         vectors.append(PointStruct(
                             id=point_id,
                             vector=embedding,
                             payload={
-                                "type": "text",
+                                "type": "image",
                                 "page": page_num + 1,
-                                "content": sentence.strip(),
-                                "file_name": pdf_file_name
+                                "content": metadata_text,
+                                "file_name": pdf_file_name,
+                                "image_name": img_name
                             }
                         ))
+                        chunk_images.append((img_name, img))
 
-                # Process images
-                images = extract_images_from_page(page, page_num)
-                st.write(f"Page {page_num + 1}: {len(images)} images extracted")
-                for img_name, img, bbox in images:
-                    x, y, w, h = bbox
-                    try:
-                        extended_rect = fitz.Rect(x/2, y/2, (x+w)/2, (y+h)/2).extend(50)
-                        nearby_text = page.get_text("text", clip=extended_rect)
-                    except Exception:
-                        nearby_text = "No nearby text found"
+                # Upsert vectors for this chunk
+                try:
+                    qdrant_client.upsert(collection_name="manual_vectors", points=vectors)
+                    total_vectors += len(vectors)
+                    total_images += len(chunk_images)
+                except Exception as e:
+                    logger.error(f"Error upserting vectors for chunk {chunk_start//chunk_size + 1}: {e}")
 
-                    metadata_text = f"Image metadata: {nearby_text}"
-                    embedding = model.encode(metadata_text).tolist()
-                    point_id = str(uuid.uuid4())
-                    vectors.append(PointStruct(
-                        id=point_id,
-                        vector=embedding,
-                        payload={
-                            "type": "image",
-                            "page": page_num + 1,
-                            "content": metadata_text,
-                            "file_name": pdf_file_name,
-                            "image_name": img_name
-                        }
-                    ))
-                    all_extracted_images.append((img_name, img))
+                # Display a sample of images from this chunk
+                st.write(f"Displaying sample images from pages {chunk_start + 1} to {chunk_end}:")
+                display_images = chunk_images if len(chunk_images) <= 4 else random.sample(chunk_images, 4)
+                cols = st.columns(4)
+                for idx, (img_name, img) in enumerate(display_images):
+                    with cols[idx % 4]:
+                        st.image(img, caption=img_name, use_column_width=True)
+
+                # Force garbage collection after each chunk
+                gc.collect()
 
             doc.close()
 
@@ -184,35 +214,10 @@ def vectorize_pdfs():
         except Exception as e:
             logger.error(f"Error processing file {pdf_file_name}: {e}")
 
-    try:
-        if not recreate_qdrant_collection():
-            return False
+    st.write(f"Total vectors processed: {total_vectors}")
+    st.write(f"Total images extracted: {total_images}")
 
-        batch_size = 100
-        for i in range(0, len(vectors), batch_size):
-            batch = vectors[i:i + batch_size]
-            try:
-                qdrant_client.upsert(collection_name="manual_vectors", points=batch)
-            except Exception as e:
-                logger.error(f"Error upserting batch {i // batch_size}: {e}")
-                continue
-
-        logger.info(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
-
-        # Display up to 100 randomly selected images
-        st.write(f"Total images extracted: {len(all_extracted_images)}")
-        display_images = all_extracted_images if len(all_extracted_images) <= 100 else random.sample(all_extracted_images, 100)
-        
-        st.write(f"Displaying {len(display_images)} randomly selected images:")
-        cols = st.columns(4)  # Create 4 columns for image display
-        for idx, (img_name, img) in enumerate(display_images):
-            with cols[idx % 4]:  # Distribute images across columns
-                st.image(img, caption=img_name, use_column_width=True)
-
-        return True
-    except Exception as e:
-        logger.error(f"Error in final steps of vectorization: {e}")
-        return False
+    return True
 
 def get_api_key():
     if 'openai' in st.secrets:
@@ -276,6 +281,7 @@ if st.button("Process PDFs from Cloudflare R2"):
                 st.warning("Processing completed with some errors. Check the logs for more information.")
         except Exception as e:
             st.error(f"An error occurred during processing: {str(e)}")
+            st.error(f"Traceback: {traceback.format_exc()}")
         finally:
             # Force garbage collection to free up memory
             gc.collect()
@@ -284,12 +290,13 @@ st.sidebar.markdown("""
 ## How to use the system:
 1. Click the "Process PDFs from Cloudflare R2" button to start processing all available PDFs in Cloudflare R2.
 2. The system will extract text and images from each PDF using advanced image processing techniques.
-3. Up to 100 randomly selected extracted images will be displayed.
-4. Text will be split into sentences and vectorized.
-5. Images will be extracted using contour detection and vectorized along with their nearby text as metadata.
-6. All vectors will be stored in Qdrant, replacing any existing vectors.
-7. You'll see a success message when the process is complete.
-8. Use the question answering section below to query the processed documents.
+3. PDFs are processed in chunks of 10 pages at a time to manage memory usage.
+4. A sample of extracted images will be displayed for each chunk.
+5. Text will be split into sentences and vectorized.
+6. Images will be extracted using contour detection and vectorized along with their nearby text as metadata.
+7. Vectors will be stored in Qdrant after each chunk is processed.
+8. You'll see a success message when the process is complete, along with total vectors and images processed.
+9. Use the question answering section below to query the processed documents.
 """)
 
 # RAG Pipeline User Interface
