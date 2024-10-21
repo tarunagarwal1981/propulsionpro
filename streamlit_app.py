@@ -12,6 +12,8 @@ import cv2
 import numpy as np
 import openai
 import os
+import io
+import base64
 import logging
 
 # Set up logging
@@ -92,6 +94,11 @@ def extract_images_from_page(page, page_num):
     
     return images
 
+def image_to_base64(image):
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode()
+
 def vectorize_pdfs():
     if not minio_client or not qdrant_client:
         logger.error("MinIO or Qdrant client not initialized.")
@@ -110,6 +117,8 @@ def vectorize_pdfs():
             response = minio_client.get_object(st.secrets["R2_BUCKET_NAME"], pdf_file_name)
             pdf_content = response.read()
             doc = fitz.open(stream=pdf_content, filetype="pdf")
+
+            st.write(f"Processing: {pdf_file_name}")
 
             for page_num in range(len(doc)):
                 logger.info(f"Processing page {page_num + 1} of {pdf_file_name}...")
@@ -135,6 +144,7 @@ def vectorize_pdfs():
 
                 # Process images
                 images = extract_images_from_page(page, page_num)
+                st.write(f"Page {page_num + 1}: {len(images)} images extracted")
                 for img_name, img, bbox in images:
                     x, y, w, h = bbox
                     try:
@@ -157,6 +167,9 @@ def vectorize_pdfs():
                             "image_name": img_name
                         }
                     ))
+
+                    # Display the extracted image
+                    st.image(img, caption=img_name, use_column_width=True)
 
             doc.close()
 
@@ -244,11 +257,12 @@ st.sidebar.markdown("""
 ## How to use the system:
 1. Click the "Process PDFs from Cloudflare R2" button to start processing all available PDFs in Cloudflare R2.
 2. The system will extract text and images from each PDF using advanced image processing techniques.
-3. Text will be split into sentences and vectorized.
-4. Images will be extracted using contour detection and vectorized along with their nearby text as metadata.
-5. All vectors will be stored in Qdrant, replacing any existing vectors.
-6. You'll see a success message when the process is complete.
-7. Use the question answering section below to query the processed documents.
+3. Extracted images will be displayed for each page.
+4. Text will be split into sentences and vectorized.
+5. Images will be extracted using contour detection and vectorized along with their nearby text as metadata.
+6. All vectors will be stored in Qdrant, replacing any existing vectors.
+7. You'll see a success message when the process is complete.
+8. Use the question answering section below to query the processed documents.
 """)
 
 # RAG Pipeline User Interface
