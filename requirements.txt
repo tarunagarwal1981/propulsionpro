@@ -1,4 +1,3 @@
-upgrade pip
 streamlit
 PyPDF2
 nltk
