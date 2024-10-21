@@ -16,6 +16,8 @@ import io
 import base64
 import logging
 import random
+import gc
+import multiprocessing
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -76,24 +78,28 @@ def recreate_qdrant_collection():
         return False
 
 def extract_images_from_page(page, page_num):
-    zoom = 2
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    img_np = np.array(img)
-    gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-    _, binary = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
-    contours, _ = cv2.findContours(255 - binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    images = []
-    for i, contour in enumerate(contours):
-        x, y, w, h = cv2.boundingRect(contour)
-        if w > 100 and h > 100:
-            roi = img_np[y:y+h, x:x+w]
-            pil_img = Image.fromarray(roi)
-            images.append((f"Page {page_num + 1}, Image {i + 1}", pil_img, (x, y, w, h)))
-    
-    return images
+    try:
+        zoom = 2
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img_np = np.array(img)
+        gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        _, binary = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(255 - binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        images = []
+        for i, contour in enumerate(contours):
+            x, y, w, h = cv2.boundingRect(contour)
+            if w > 100 and h > 100:
+                roi = img_np[y:y+h, x:x+w]
+                pil_img = Image.fromarray(roi)
+                images.append((f"Page {page_num + 1}, Image {i + 1}", pil_img, (x, y, w, h)))
+        
+        return images
+    except Exception as e:
+        logger.error(f"Error extracting images from page {page_num}: {e}")
+        return []
 
 def image_to_base64(image):
     buffered = io.BytesIO()
@@ -178,31 +184,35 @@ def vectorize_pdfs():
         except Exception as e:
             logger.error(f"Error processing file {pdf_file_name}: {e}")
 
-    if not recreate_qdrant_collection():
-        return False
-
-    batch_size = 100
-    for i in range(0, len(vectors), batch_size):
-        batch = vectors[i:i + batch_size]
-        try:
-            qdrant_client.upsert(collection_name="manual_vectors", points=batch)
-        except Exception as e:
-            logger.error(f"Error upserting batch {i // batch_size}: {e}")
+    try:
+        if not recreate_qdrant_collection():
             return False
 
-    logger.info(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
+        batch_size = 100
+        for i in range(0, len(vectors), batch_size):
+            batch = vectors[i:i + batch_size]
+            try:
+                qdrant_client.upsert(collection_name="manual_vectors", points=batch)
+            except Exception as e:
+                logger.error(f"Error upserting batch {i // batch_size}: {e}")
+                continue
 
-    # Display up to 100 randomly selected images
-    st.write(f"Total images extracted: {len(all_extracted_images)}")
-    display_images = all_extracted_images if len(all_extracted_images) <= 100 else random.sample(all_extracted_images, 100)
-    
-    st.write(f"Displaying {len(display_images)} randomly selected images:")
-    cols = st.columns(4)  # Create 4 columns for image display
-    for idx, (img_name, img) in enumerate(display_images):
-        with cols[idx % 4]:  # Distribute images across columns
-            st.image(img, caption=img_name, use_column_width=True)
+        logger.info(f"Successfully processed {len(vectors)} vectors from {len(pdf_file_names)} PDF files.")
 
-    return True
+        # Display up to 100 randomly selected images
+        st.write(f"Total images extracted: {len(all_extracted_images)}")
+        display_images = all_extracted_images if len(all_extracted_images) <= 100 else random.sample(all_extracted_images, 100)
+        
+        st.write(f"Displaying {len(display_images)} randomly selected images:")
+        cols = st.columns(4)  # Create 4 columns for image display
+        for idx, (img_name, img) in enumerate(display_images):
+            with cols[idx % 4]:  # Distribute images across columns
+                st.image(img, caption=img_name, use_column_width=True)
+
+        return True
+    except Exception as e:
+        logger.error(f"Error in final steps of vectorization: {e}")
+        return False
 
 def get_api_key():
     if 'openai' in st.secrets:
@@ -259,10 +269,16 @@ st.title('Advanced PDF Extractor and Vectorizer')
 
 if st.button("Process PDFs from Cloudflare R2"):
     with st.spinner("Processing PDFs from Cloudflare R2, extracting content, and saving in Qdrant..."):
-        if vectorize_pdfs():
-            st.success("All PDFs have been successfully processed and vectors saved in Qdrant!")
-        else:
-            st.error("There was an error processing the PDFs. Please check the logs for more information.")
+        try:
+            if vectorize_pdfs():
+                st.success("All PDFs have been successfully processed and vectors saved in Qdrant!")
+            else:
+                st.warning("Processing completed with some errors. Check the logs for more information.")
+        except Exception as e:
+            st.error(f"An error occurred during processing: {str(e)}")
+        finally:
+            # Force garbage collection to free up memory
+            gc.collect()
 
 st.sidebar.markdown("""
 ## How to use the system:
@@ -297,3 +313,6 @@ if st.button("Get Answer"):
                 st.write(answer[:500] + "..." if len(answer) > 500 else answer)
     else:
         st.error("Please enter a question.")
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
