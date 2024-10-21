@@ -5,7 +5,7 @@ from minio.error import S3Error
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, VectorParams
+from qdrant_client.models import PointStruct, VectorParams, Filter, FieldCondition, Range
 import re
 import uuid
 import cv2
@@ -19,6 +19,17 @@ import random
 import gc
 import multiprocessing
 import traceback
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+from nltk import sent_tokenize, word_tokenize, ne_chunk, pos_tag
+from nltk.chunk import tree2conlltags
+import nltk
+
+# Download necessary NLTK data
+nltk.download('punkt')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('maxent_ne_chunker')
+nltk.download('words')
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -78,6 +89,7 @@ def recreate_qdrant_collection():
         logger.error(f"Failed to create new collection: {e}")
         return False
 
+# Keep the existing image extraction function
 def extract_images_from_page(page, page_num):
     try:
         zoom = 2
@@ -102,10 +114,43 @@ def extract_images_from_page(page, page_num):
         logger.error(f"Error extracting images from page {page_num}: {e}")
         return []
 
-def image_to_base64(image):
-    buffered = io.BytesIO()
-    image.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
+def extract_text_around_image(page, bbox, margin=50):
+    x, y, w, h = bbox
+    extended_rect = fitz.Rect(x/2-margin, y/2-margin, (x+w)/2+margin, (y+h)/2+margin)
+    return page.get_text("text", clip=extended_rect)
+
+def process_text(text):
+    # Tokenize text
+    sentences = sent_tokenize(text)
+    
+    # Perform NER
+    ner_results = []
+    for sentence in sentences:
+        tokens = word_tokenize(sentence)
+        tagged = pos_tag(tokens)
+        chunked = ne_chunk(tagged)
+        ner_result = tree2conlltags(chunked)
+        ner_results.extend(ner_result)
+    
+    # Extract named entities
+    entities = [word for word, pos, ne in ner_results if ne != 'O']
+    
+    return {
+        'full_text': text,
+        'sentences': sentences,
+        'entities': entities
+    }
+
+def compute_tfidf(texts):
+    vectorizer = TfidfVectorizer(max_features=100)
+    tfidf_matrix = vectorizer.fit_transform(texts)
+    feature_names = vectorizer.get_feature_names_out()
+    return tfidf_matrix, feature_names
+
+def perform_topic_modeling(tfidf_matrix, num_topics=5):
+    lda = LatentDirichletAllocation(n_components=num_topics, random_state=42)
+    lda.fit(tfidf_matrix)
+    return lda
 
 def vectorize_pdfs():
     if not minio_client or not qdrant_client:
@@ -134,6 +179,7 @@ def vectorize_pdfs():
 
             st.write(f"Processing: {pdf_file_name}")
 
+            all_text = []
             for chunk_start in range(0, len(doc), chunk_size):
                 chunk_end = min(chunk_start + chunk_size, len(doc))
                 vectors = []
@@ -145,34 +191,32 @@ def vectorize_pdfs():
                     
                     # Process text
                     text = page.get_text()
-                    sentences = re.split(r'(?<=[.!?])\s+', text)
-                    for sentence in sentences:
-                        if len(sentence.strip()) > 0:
-                            embedding = model.encode(sentence.strip()).tolist()
-                            point_id = str(uuid.uuid4())
-                            vectors.append(PointStruct(
-                                id=point_id,
-                                vector=embedding,
-                                payload={
-                                    "type": "text",
-                                    "page": page_num + 1,
-                                    "content": sentence.strip(),
-                                    "file_name": pdf_file_name
-                                }
-                            ))
+                    all_text.append(text)
+                    processed_text = process_text(text)
+                    
+                    for sentence in processed_text['sentences']:
+                        embedding = model.encode(sentence).tolist()
+                        point_id = str(uuid.uuid4())
+                        vectors.append(PointStruct(
+                            id=point_id,
+                            vector=embedding,
+                            payload={
+                                "type": "text",
+                                "page": page_num + 1,
+                                "content": sentence,
+                                "entities": processed_text['entities'],
+                                "file_name": pdf_file_name
+                            }
+                        ))
 
                     # Process images
                     images = extract_images_from_page(page, page_num)
                     st.write(f"Page {page_num + 1}: {len(images)} images extracted")
                     for img_name, img, bbox in images:
-                        x, y, w, h = bbox
-                        try:
-                            extended_rect = fitz.Rect(x/2, y/2, (x+w)/2, (y+h)/2).extend(50)
-                            nearby_text = page.get_text("text", clip=extended_rect)
-                        except Exception:
-                            nearby_text = "No nearby text found"
-
-                        metadata_text = f"Image metadata: {nearby_text}"
+                        surrounding_text = extract_text_around_image(page, bbox)
+                        processed_surrounding_text = process_text(surrounding_text)
+                        
+                        metadata_text = f"Image metadata: {surrounding_text}"
                         embedding = model.encode(metadata_text).tolist()
                         point_id = str(uuid.uuid4())
                         vectors.append(PointStruct(
@@ -182,11 +226,24 @@ def vectorize_pdfs():
                                 "type": "image",
                                 "page": page_num + 1,
                                 "content": metadata_text,
+                                "surrounding_text": surrounding_text,
+                                "entities": processed_surrounding_text['entities'],
                                 "file_name": pdf_file_name,
                                 "image_name": img_name
                             }
                         ))
                         chunk_images.append((img_name, img))
+
+                # Perform TF-IDF and topic modeling on the chunk
+                tfidf_matrix, feature_names = compute_tfidf(all_text)
+                lda_model = perform_topic_modeling(tfidf_matrix)
+                
+                # Add topic information to vectors
+                for vector in vectors:
+                    if vector.payload["type"] == "text":
+                        text_vector = tfidf_matrix[all_text.index(vector.payload["content"])]
+                        topic_distribution = lda_model.transform(text_vector)[0]
+                        vector.payload["topics"] = topic_distribution.tolist()
 
                 # Upsert vectors for this chunk
                 try:
@@ -237,7 +294,17 @@ def rag_pipeline(question):
     search_result = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_embedding,
-        limit=10
+        limit=10,
+        query_filter=Filter(
+            must=[
+                FieldCondition(
+                    key="page",
+                    range=Range(
+                        gte=1
+                    )
+                )
+            ]
+        )
     )
     
     context = ""
@@ -246,9 +313,14 @@ def rag_pipeline(question):
         payload = result.payload
         if payload["type"] == "text":
             context += f"From {payload['file_name']}, page {payload['page']}: {payload['content']}\n"
+            context += f"Entities: {', '.join(payload['entities'])}\n"
+            if 'topics' in payload:
+                context += f"Topics: {payload['topics']}\n"
         elif payload["type"] == "image":
             relevant_images.append(payload)
-            context += f"Image found in {payload['file_name']}, page {payload['page']}: {payload['content']}\n"
+            context += f"Image found in {payload['file_name']}, page {payload['page']}:\n"
+            context += f"Surrounding text: {payload['surrounding_text']}\n"
+            context += f"Entities: {', '.join(payload['entities'])}\n"
 
     logger.info(f"Context being sent to LLM:\n{context}")
 
@@ -257,8 +329,8 @@ def rag_pipeline(question):
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant. Answer the question based solely on the provided context. If the context doesn't contain relevant information, say so."},
-                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer the question using only the information provided in the context above. If the context doesn't contain relevant information to answer the question, please state that."}
+                {"role": "system", "content": "You are a helpful assistant. Answer the question based solely on the provided context. If the context doesn't contain relevant information, say so. Use the entities and topics information to provide a more accurate and contextual answer."},
+                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer the question using only the information provided in the context above. If the context doesn't contain relevant information to answer the question, please state that. Consider the entities and topics mentioned in the context for a more comprehensive answer."}
             ]
         )
         
@@ -291,9 +363,9 @@ st.sidebar.markdown("""
 1. Click the "Process PDFs from Cloudflare R2" button to start processing all available PDFs in Cloudflare R2.
 2. The system will extract text and images from each PDF using advanced image processing techniques.
 3. PDFs are processed in chunks of 10 pages at a time to manage memory usage.
-4. A sample of extracted images will be displayed for each chunk.
-5. Text will be split into sentences and vectorized.
-6. Images will be extracted using contour detection and vectorized along with their nearby text as metadata.
+4. Text is analyzed for entities, topics, and key phrases.
+5. Images are labeled with surrounding text and relevant entities.
+6. A sample of extracted images will be displayed for each chunk.
 7. Vectors will be stored in Qdrant after each chunk is processed.
 8. You'll see a success message when the process is complete, along with total vectors and images processed.
 9. Use the question answering section below to query the processed documents.
@@ -312,6 +384,8 @@ if st.button("Get Answer"):
                 st.write("**Relevant Images:**")
                 for img_data in images:
                     st.write(f"- {img_data['image_name']} from {img_data['file_name']}, page {img_data['page']}")
+                    st.write(f"  Surrounding text: {img_data['surrounding_text'][:100]}...")
+                    st.write(f"  Entities: {', '.join(img_data['entities'])}")
             
             # Display debug information
             with st.expander("Debug Information"):
