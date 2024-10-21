@@ -21,19 +21,27 @@ import multiprocessing
 import traceback
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
-from nltk import sent_tokenize, word_tokenize, ne_chunk, pos_tag
-from nltk.chunk import tree2conlltags
 import nltk
-
-# Download necessary NLTK data
-nltk.download('punkt')
-nltk.download('averaged_perceptron_tagger')
-nltk.download('maxent_ne_chunker')
-nltk.download('words')
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Set NLTK data path to a writable directory
+nltk.data.path.append('/tmp/nltk_data')
+
+def download_nltk_data():
+    try:
+        nltk.download('punkt', quiet=True, raise_on_error=True, download_dir='/tmp/nltk_data')
+        nltk.download('averaged_perceptron_tagger', quiet=True, raise_on_error=True, download_dir='/tmp/nltk_data')
+        nltk.download('maxent_ne_chunker', quiet=True, raise_on_error=True, download_dir='/tmp/nltk_data')
+        nltk.download('words', quiet=True, raise_on_error=True, download_dir='/tmp/nltk_data')
+    except Exception as e:
+        logger.warning(f"Failed to download NLTK data: {e}")
+        return False
+    return True
+
+nltk_data_available = download_nltk_data()
 
 # Load the embedding model (cached to avoid reloading on every app refresh)
 @st.cache_resource
@@ -89,7 +97,6 @@ def recreate_qdrant_collection():
         logger.error(f"Failed to create new collection: {e}")
         return False
 
-# Keep the existing image extraction function
 def extract_images_from_page(page, page_num):
     try:
         zoom = 2
@@ -119,21 +126,42 @@ def extract_text_around_image(page, bbox, margin=50):
     extended_rect = fitz.Rect(x/2-margin, y/2-margin, (x+w)/2+margin, (y+h)/2+margin)
     return page.get_text("text", clip=extended_rect)
 
+def basic_process_text(text):
+    # Simple sentence splitting
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    
+    # Simple word-based entity extraction (e.g., capitalized words)
+    words = text.split()
+    entities = [word for word in words if word.istitle() and len(word) > 1]
+    
+    return {
+        'full_text': text,
+        'sentences': sentences,
+        'entities': entities
+    }
+
 def process_text(text):
-    # Tokenize text
-    sentences = sent_tokenize(text)
-    
-    # Perform NER
-    ner_results = []
-    for sentence in sentences:
-        tokens = word_tokenize(sentence)
-        tagged = pos_tag(tokens)
-        chunked = ne_chunk(tagged)
-        ner_result = tree2conlltags(chunked)
-        ner_results.extend(ner_result)
-    
-    # Extract named entities
-    entities = [word for word, pos, ne in ner_results if ne != 'O']
+    if nltk_data_available:
+        try:
+            # Tokenize text
+            sentences = nltk.sent_tokenize(text)
+            
+            # Perform NER
+            ner_results = []
+            for sentence in sentences:
+                tokens = nltk.word_tokenize(sentence)
+                tagged = nltk.pos_tag(tokens)
+                chunked = nltk.ne_chunk(tagged)
+                ner_result = nltk.tree2conlltags(chunked)
+                ner_results.extend(ner_result)
+            
+            # Extract named entities
+            entities = [word for word, pos, ne in ner_results if ne != 'O']
+        except Exception as e:
+            logger.warning(f"Error in NLTK processing: {e}. Falling back to basic processing.")
+            return basic_process_text(text)
+    else:
+        return basic_process_text(text)
     
     return {
         'full_text': text,
@@ -186,64 +214,72 @@ def vectorize_pdfs():
                 chunk_images = []
 
                 for page_num in range(chunk_start, chunk_end):
-                    logger.info(f"Processing page {page_num + 1} of {pdf_file_name}...")
-                    page = doc[page_num]
-                    
-                    # Process text
-                    text = page.get_text()
-                    all_text.append(text)
-                    processed_text = process_text(text)
-                    
-                    for sentence in processed_text['sentences']:
-                        embedding = model.encode(sentence).tolist()
-                        point_id = str(uuid.uuid4())
-                        vectors.append(PointStruct(
-                            id=point_id,
-                            vector=embedding,
-                            payload={
-                                "type": "text",
-                                "page": page_num + 1,
-                                "content": sentence,
-                                "entities": processed_text['entities'],
-                                "file_name": pdf_file_name
-                            }
-                        ))
-
-                    # Process images
-                    images = extract_images_from_page(page, page_num)
-                    st.write(f"Page {page_num + 1}: {len(images)} images extracted")
-                    for img_name, img, bbox in images:
-                        surrounding_text = extract_text_around_image(page, bbox)
-                        processed_surrounding_text = process_text(surrounding_text)
+                    try:
+                        logger.info(f"Processing page {page_num + 1} of {pdf_file_name}...")
+                        page = doc[page_num]
                         
-                        metadata_text = f"Image metadata: {surrounding_text}"
-                        embedding = model.encode(metadata_text).tolist()
-                        point_id = str(uuid.uuid4())
-                        vectors.append(PointStruct(
-                            id=point_id,
-                            vector=embedding,
-                            payload={
-                                "type": "image",
-                                "page": page_num + 1,
-                                "content": metadata_text,
-                                "surrounding_text": surrounding_text,
-                                "entities": processed_surrounding_text['entities'],
-                                "file_name": pdf_file_name,
-                                "image_name": img_name
-                            }
-                        ))
-                        chunk_images.append((img_name, img))
+                        # Process text
+                        text = page.get_text()
+                        all_text.append(text)
+                        processed_text = process_text(text)
+                        
+                        for sentence in processed_text['sentences']:
+                            embedding = model.encode(sentence).tolist()
+                            point_id = str(uuid.uuid4())
+                            vectors.append(PointStruct(
+                                id=point_id,
+                                vector=embedding,
+                                payload={
+                                    "type": "text",
+                                    "page": page_num + 1,
+                                    "content": sentence,
+                                    "entities": processed_text['entities'],
+                                    "file_name": pdf_file_name
+                                }
+                            ))
+
+                        # Process images
+                        images = extract_images_from_page(page, page_num)
+                        st.write(f"Page {page_num + 1}: {len(images)} images extracted")
+                        for img_name, img, bbox in images:
+                            surrounding_text = extract_text_around_image(page, bbox)
+                            processed_surrounding_text = process_text(surrounding_text)
+                            
+                            metadata_text = f"Image metadata: {surrounding_text}"
+                            embedding = model.encode(metadata_text).tolist()
+                            point_id = str(uuid.uuid4())
+                            vectors.append(PointStruct(
+                                id=point_id,
+                                vector=embedding,
+                                payload={
+                                    "type": "image",
+                                    "page": page_num + 1,
+                                    "content": metadata_text,
+                                    "surrounding_text": surrounding_text,
+                                    "entities": processed_surrounding_text['entities'],
+                                    "file_name": pdf_file_name,
+                                    "image_name": img_name
+                                }
+                            ))
+                            chunk_images.append((img_name, img))
+
+                    except Exception as e:
+                        logger.error(f"Error processing page {page_num + 1} of {pdf_file_name}: {e}")
+                        continue  # Skip this page and continue with the next
 
                 # Perform TF-IDF and topic modeling on the chunk
-                tfidf_matrix, feature_names = compute_tfidf(all_text)
-                lda_model = perform_topic_modeling(tfidf_matrix)
-                
-                # Add topic information to vectors
-                for vector in vectors:
-                    if vector.payload["type"] == "text":
-                        text_vector = tfidf_matrix[all_text.index(vector.payload["content"])]
-                        topic_distribution = lda_model.transform(text_vector)[0]
-                        vector.payload["topics"] = topic_distribution.tolist()
+                try:
+                    tfidf_matrix, feature_names = compute_tfidf(all_text)
+                    lda_model = perform_topic_modeling(tfidf_matrix)
+                    
+                    # Add topic information to vectors
+                    for vector in vectors:
+                        if vector.payload["type"] == "text":
+                            text_vector = tfidf_matrix[all_text.index(vector.payload["content"])]
+                            topic_distribution = lda_model.transform(text_vector)[0]
+                            vector.payload["topics"] = topic_distribution.tolist()
+                except Exception as e:
+                    logger.warning(f"Error in TF-IDF or topic modeling: {e}. Skipping this step.")
 
                 # Upsert vectors for this chunk
                 try:
