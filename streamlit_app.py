@@ -36,10 +36,10 @@ def download_nltk_data():
         nltk.download('averaged_perceptron_tagger', quiet=True, raise_on_error=True, download_dir='/tmp/nltk_data')
         nltk.download('maxent_ne_chunker', quiet=True, raise_on_error=True, download_dir='/tmp/nltk_data')
         nltk.download('words', quiet=True, raise_on_error=True, download_dir='/tmp/nltk_data')
+        return True
     except Exception as e:
         logger.warning(f"Failed to download NLTK data: {e}")
         return False
-    return True
 
 nltk_data_available = download_nltk_data()
 
@@ -127,13 +127,9 @@ def extract_text_around_image(page, bbox, margin=50):
     return page.get_text("text", clip=extended_rect)
 
 def basic_process_text(text):
-    # Simple sentence splitting
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
-    
-    # Simple word-based entity extraction (e.g., capitalized words)
     words = text.split()
     entities = [word for word in words if word.istitle() and len(word) > 1]
-    
     return {
         'full_text': text,
         'sentences': sentences,
@@ -143,20 +139,10 @@ def basic_process_text(text):
 def process_text(text):
     if nltk_data_available:
         try:
-            # Tokenize text
             sentences = nltk.sent_tokenize(text)
-            
-            # Perform NER
-            ner_results = []
-            for sentence in sentences:
-                tokens = nltk.word_tokenize(sentence)
-                tagged = nltk.pos_tag(tokens)
-                chunked = nltk.ne_chunk(tagged)
-                ner_result = nltk.tree2conlltags(chunked)
-                ner_results.extend(ner_result)
-            
-            # Extract named entities
-            entities = [word for word, pos, ne in ner_results if ne != 'O']
+            tokens = nltk.word_tokenize(text)
+            tagged = nltk.pos_tag(tokens)
+            entities = [word for word, pos in tagged if pos in ['NNP', 'NNPS']]
         except Exception as e:
             logger.warning(f"Error in NLTK processing: {e}. Falling back to basic processing.")
             return basic_process_text(text)
@@ -192,7 +178,7 @@ def vectorize_pdfs():
         logger.error(f"Error listing PDF files from Cloudflare R2: {e}")
         return False
 
-    chunk_size = 10  # Process 10 pages at a time
+    chunk_size = 10
     total_vectors = 0
     total_images = 0
 
@@ -218,7 +204,6 @@ def vectorize_pdfs():
                         logger.info(f"Processing page {page_num + 1} of {pdf_file_name}...")
                         page = doc[page_num]
                         
-                        # Process text
                         text = page.get_text()
                         all_text.append(text)
                         processed_text = process_text(text)
@@ -238,7 +223,6 @@ def vectorize_pdfs():
                                 }
                             ))
 
-                        # Process images
                         images = extract_images_from_page(page, page_num)
                         st.write(f"Page {page_num + 1}: {len(images)} images extracted")
                         for img_name, img, bbox in images:
@@ -265,14 +249,12 @@ def vectorize_pdfs():
 
                     except Exception as e:
                         logger.error(f"Error processing page {page_num + 1} of {pdf_file_name}: {e}")
-                        continue  # Skip this page and continue with the next
+                        continue
 
-                # Perform TF-IDF and topic modeling on the chunk
                 try:
                     tfidf_matrix, feature_names = compute_tfidf(all_text)
                     lda_model = perform_topic_modeling(tfidf_matrix)
                     
-                    # Add topic information to vectors
                     for vector in vectors:
                         if vector.payload["type"] == "text":
                             text_vector = tfidf_matrix[all_text.index(vector.payload["content"])]
@@ -281,7 +263,6 @@ def vectorize_pdfs():
                 except Exception as e:
                     logger.warning(f"Error in TF-IDF or topic modeling: {e}. Skipping this step.")
 
-                # Upsert vectors for this chunk
                 try:
                     qdrant_client.upsert(collection_name="manual_vectors", points=vectors)
                     total_vectors += len(vectors)
@@ -289,7 +270,6 @@ def vectorize_pdfs():
                 except Exception as e:
                     logger.error(f"Error upserting vectors for chunk {chunk_start//chunk_size + 1}: {e}")
 
-                # Display a sample of images from this chunk
                 st.write(f"Displaying sample images from pages {chunk_start + 1} to {chunk_end}:")
                 display_images = chunk_images if len(chunk_images) <= 4 else random.sample(chunk_images, 4)
                 cols = st.columns(4)
@@ -297,7 +277,6 @@ def vectorize_pdfs():
                     with cols[idx % 4]:
                         st.image(img, caption=img_name, use_column_width=True)
 
-                # Force garbage collection after each chunk
                 gc.collect()
 
             doc.close()
