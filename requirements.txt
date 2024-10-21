@@ -23,4 +23,4 @@ matplotlib
 poppler-utils
 tiktoken
 opencv-python-headless
-os
+
