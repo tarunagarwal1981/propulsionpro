@@ -1,6 +1,6 @@
 streamlit
 PyPDF2
-nltk_data
+nltk_data==0.1
 numpy
 pandas
 scikit-learn
