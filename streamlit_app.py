@@ -56,48 +56,36 @@ class SessionState:
 
 class ModelLoader:
     """Handles loading and caching of ML models"""
-    def __init__(self):
-        self.embedding_model = None
-        self.ner_model = None
-
-    def load_models(self):
-        """Load and cache the required models"""
+    @st.cache_resource
+    def load_embedding_model():
         try:
-            if 'models' not in st.session_state:
-                st.session_state.models = {}
-
-            # Load embedding model if not cached
-            if 'embedding_model' not in st.session_state.models:
-                st.session_state.models['embedding_model'] = SentenceTransformer('all-MiniLM-L6-v2')
-            
-            # Load NER model if not cached
-            if 'ner_model' not in st.session_state.models:
-                st.session_state.models['ner_model'] = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
-            
-            self.embedding_model = st.session_state.models['embedding_model']
-            self.ner_model = st.session_state.models['ner_model']
-            
-            return self.embedding_model, self.ner_model
-
+            return SentenceTransformer('all-MiniLM-L6-v2')
         except Exception as e:
-            logger.error(f"Error loading models: {e}")
-            st.error(f"Error loading models: {str(e)}")
+            logger.error(f"Error loading embedding model: {e}")
             raise
 
-    def setup_nltk(self):
-        """Set up NLTK data"""
-        nltk.data.path.append('/tmp/nltk_data')
-        required_packages = ['punkt', 'averaged_perceptron_tagger', 
-                           'maxent_ne_chunker', 'words']
-        
-        for package in required_packages:
-            try:
-                nltk.download(package, quiet=True, download_dir='/tmp/nltk_data')
-            except Exception as e:
-                logger.error(f"Failed to download NLTK package {package}: {e}")
-                return False
-        return True
+    @st.cache_resource
+    def load_ner_model():
+        try:
+            return pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
+        except Exception as e:
+            logger.error(f"Error loading NER model: {e}")
+            raise
 
+    @staticmethod
+    def setup_nltk():
+        try:
+            nltk.data.path.append('/tmp/nltk_data')
+            required_packages = ['punkt', 'averaged_perceptron_tagger', 
+                               'maxent_ne_chunker', 'words']
+            
+            for package in required_packages:
+                nltk.download(package, quiet=True, download_dir='/tmp/nltk_data')
+            return True
+        except Exception as e:
+            logger.error(f"Failed to setup NLTK: {e}")
+            return False
+            
 class ClientManager:
     """Manages MinIO and Qdrant clients"""
     @staticmethod
@@ -614,14 +602,12 @@ def create_streamlit_ui():
     # Initialize session state
     SessionState.init()
 
-    # Initialize model loader
-    model_loader = ModelLoader()
-    
     try:
-        # Load models
+        # Load models using the static methods
         with st.spinner("Loading models..."):
-            embedding_model, ner_model = model_loader.load_models()
-            model_loader.setup_nltk()
+            embedding_model = ModelLoader.load_embedding_model()
+            ner_model = ModelLoader.load_ner_model()
+            ModelLoader.setup_nltk()
 
         # Initialize clients
         minio_client, qdrant_client = ClientManager.initialize_clients()
@@ -689,3 +675,4 @@ if __name__ == "__main__":
     except Exception as e:
         st.error(f"Application error: {str(e)}")
         logger.error(f"Application error: {e}")
+    
