@@ -22,6 +22,7 @@ import traceback
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 import nltk
+from transformers import pipeline
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +50,13 @@ def load_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 model = load_model()
+
+# Initialize NER pipeline
+@st.cache_resource
+def load_ner_model():
+    return pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
+
+ner_model = load_ner_model()
 
 # Initialize MinIO client for Cloudflare R2
 def initialize_minio():
@@ -126,16 +134,6 @@ def extract_text_around_image(page, bbox, margin=50):
     extended_rect = fitz.Rect(x/2-margin, y/2-margin, (x+w)/2+margin, (y+h)/2+margin)
     return page.get_text("text", clip=extended_rect)
 
-def basic_process_text(text):
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
-    words = text.split()
-    entities = [word for word in words if word.istitle() and len(word) > 1]
-    return {
-        'full_text': text,
-        'sentences': sentences,
-        'entities': entities
-    }
-
 def process_text(text):
     if nltk_data_available:
         try:
@@ -143,12 +141,28 @@ def process_text(text):
             tokens = nltk.word_tokenize(text)
             tagged = nltk.pos_tag(tokens)
             entities = [word for word, pos in tagged if pos in ['NNP', 'NNPS']]
+            
+            # Use the NER model for more accurate entity recognition
+            ner_results = ner_model(text)
+            named_entities = [entity['word'] for entity in ner_results if entity['entity'] != 'O']
+            
+            entities = list(set(entities + named_entities))  # Combine and deduplicate entities
         except Exception as e:
             logger.warning(f"Error in NLTK processing: {e}. Falling back to basic processing.")
             return basic_process_text(text)
     else:
         return basic_process_text(text)
     
+    return {
+        'full_text': text,
+        'sentences': sentences,
+        'entities': entities
+    }
+
+def basic_process_text(text):
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    words = text.split()
+    entities = [word for word in words if word.istitle() and len(word) > 1]
     return {
         'full_text': text,
         'sentences': sentences,
@@ -232,6 +246,12 @@ def vectorize_pdfs():
                             metadata_text = f"Image metadata: {surrounding_text}"
                             embedding = model.encode(metadata_text).tolist()
                             point_id = str(uuid.uuid4())
+                            
+                            # Convert PIL Image to bytes
+                            img_byte_arr = io.BytesIO()
+                            img.save(img_byte_arr, format='PNG')
+                            img_byte_arr = img_byte_arr.getvalue()
+                            
                             vectors.append(PointStruct(
                                 id=point_id,
                                 vector=embedding,
@@ -242,7 +262,8 @@ def vectorize_pdfs():
                                     "surrounding_text": surrounding_text,
                                     "entities": processed_surrounding_text['entities'],
                                     "file_name": pdf_file_name,
-                                    "image_name": img_name
+                                    "image_name": img_name,
+                                    "image_data": base64.b64encode(img_byte_arr).decode('utf-8')
                                 }
                             ))
                             chunk_images.append((img_name, img))
@@ -309,7 +330,7 @@ def rag_pipeline(question):
     search_result = qdrant_client.search(
         collection_name="manual_vectors",
         query_vector=query_embedding,
-        limit=10,
+        limit=15,  # Increased from 10 to 15 for more context
         query_filter=Filter(
             must=[
                 FieldCondition(
@@ -342,10 +363,10 @@ def rag_pipeline(question):
     try:
         openai.api_key = get_api_key()
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4",  # Upgraded to GPT-4 for better comprehension
             messages=[
-                {"role": "system", "content": "You are a helpful assistant. Answer the question based solely on the provided context. If the context doesn't contain relevant information, say so. Use the entities and topics information to provide a more accurate and contextual answer."},
-                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer the question using only the information provided in the context above. If the context doesn't contain relevant information to answer the question, please state that. Consider the entities and topics mentioned in the context for a more comprehensive answer."}
+                {"role": "system", "content": "You are a helpful assistant specialized in technical documentation. Your task is to answer questions based on the provided context. When answering, follow these guidelines:\n1. If the context contains step-by-step instructions, present them clearly.\n2. Reference specific images when they are relevant to the answer.\n3. If the context doesn't contain enough information to fully answer the question, state this clearly.\n4. Use the entities and topics information to provide a more comprehensive and contextual answer.\n5. Cite specific page numbers and document names when referencing information."},
+                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer the question using only the information provided in the context above. If the context doesn't contain relevant information to fully answer the question, please state that clearly. Consider the entities and topics mentioned in the context for a more comprehensive answer. Cite specific page numbers and document names when referencing information."}
             ]
         )
         
@@ -378,12 +399,13 @@ st.sidebar.markdown("""
 1. Click the "Process PDFs from Cloudflare R2" button to start processing all available PDFs in Cloudflare R2.
 2. The system will extract text and images from each PDF using advanced image processing techniques.
 3. PDFs are processed in chunks of 10 pages at a time to manage memory usage.
-4. Text is analyzed for entities, topics, and key phrases.
+4. Text is analyzed for entities, topics, and key phrases using advanced NLP techniques.
 5. Images are labeled with surrounding text and relevant entities.
 6. A sample of extracted images will be displayed for each chunk.
 7. Vectors will be stored in Qdrant after each chunk is processed.
 8. You'll see a success message when the process is complete, along with total vectors and images processed.
 9. Use the question answering section below to query the processed documents.
+10. You can ask follow-up questions to dive deeper into specific parts of the procedures.
 """)
 
 # RAG Pipeline User Interface
@@ -397,10 +419,17 @@ if st.button("Get Answer"):
             
             if images:
                 st.write("**Relevant Images:**")
-                for img_data in images:
-                    st.write(f"- {img_data['image_name']} from {img_data['file_name']}, page {img_data['page']}")
-                    st.write(f"  Surrounding text: {img_data['surrounding_text'][:100]}...")
-                    st.write(f"  Entities: {', '.join(img_data['entities'])}")
+                cols = st.columns(2)  # Create two columns for images
+                for idx, img_data in enumerate(images):
+                    with cols[idx % 2]:  # Alternate between columns
+                        st.write(f"- {img_data['image_name']} from {img_data['file_name']}, page {img_data['page']}")
+                        st.write(f"  Surrounding text: {img_data['surrounding_text'][:100]}...")
+                        st.write(f"  Entities: {', '.join(img_data['entities'])}")
+                        
+                        # Display the image
+                        img_bytes = base64.b64decode(img_data['image_data'])
+                        img = Image.open(io.BytesIO(img_bytes))
+                        st.image(img, caption=img_data['image_name'], use_column_width=True)
             
             # Display debug information
             with st.expander("Debug Information"):
@@ -409,6 +438,38 @@ if st.button("Get Answer"):
                 st.write(answer[:500] + "..." if len(answer) > 500 else answer)
     else:
         st.error("Please enter a question.")
+
+# Implement follow-up questions
+st.subheader("Follow-up Questions")
+follow_up = st.text_input("Ask a follow-up question:")
+if st.button("Get Follow-up Answer"):
+    if follow_up:
+        with st.spinner("Fetching follow-up answer..."):
+            follow_up_answer, follow_up_images = rag_pipeline(follow_up)
+            st.write("**Follow-up Answer:**", follow_up_answer)
+            
+            if follow_up_images:
+                st.write("**Relevant Images for Follow-up:**")
+                cols = st.columns(2)
+                for idx, img_data in enumerate(follow_up_images):
+                    with cols[idx % 2]:
+                        st.write(f"- {img_data['image_name']} from {img_data['file_name']}, page {img_data['page']}")
+                        st.write(f"  Surrounding text: {img_data['surrounding_text'][:100]}...")
+                        st.write(f"  Entities: {', '.join(img_data['entities'])}")
+                        
+                        img_bytes = base64.b64decode(img_data['image_data'])
+                        img = Image.open(io.BytesIO(img_bytes))
+                        st.image(img, caption=img_data['image_name'], use_column_width=True)
+    else:
+        st.error("Please enter a follow-up question.")
+
+# Implement feedback mechanism
+st.subheader("Feedback")
+feedback = st.radio("Was this answer helpful?", ("Yes", "No"))
+if st.button("Submit Feedback"):
+    # Here you would typically send this feedback to a database or logging system
+    st.write("Thank you for your feedback!")
+    # In a real implementation, you'd use this feedback to improve the system
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
