@@ -476,20 +476,60 @@ class RAGPipeline:
         return api_key
 
     def get_answer(self, question: str) -> Tuple[str, List[Dict[str, Any]]]:
-        try:
-            # Get relevant context and images
-            search_results = self._search_context(question)
-            context = self._build_context(search_results)
-            relevant_images = self._extract_relevant_images(search_results)
-            
-            # Generate answer
-            answer = self._generate_answer(question, context)
-            
-            return answer, relevant_images
+    """Enhanced RAG pipeline with better image handling"""
+    try:
+        # Get embeddings for the question
+        query_embedding = self.embedding_model.encode(question).tolist()
+        
+        # Search for relevant content
+        search_results = self.qdrant_client.search(
+            collection_name="manual_vectors",
+            query_vector=query_embedding,
+            limit=15,
+            query_filter=Filter(
+                must=[FieldCondition(key="page", range=Range(gte=1))]
+            )
+        )
 
-        except Exception as e:
-            logger.error(f"Error in RAG pipeline: {e}")
-            return "Sorry, there was an error processing your question.", []
+        # Process results
+        context = []
+        relevant_images = []
+        
+        for result in search_results:
+            payload = result.payload
+            
+            if payload["type"] == "text":
+                context.append(f"From {payload['file_name']}, page {payload['page']}:")
+                context.append(payload['content'])
+                if 'technical_terms' in payload and payload['technical_terms']:
+                    context.append(f"Technical terms: {', '.join(payload['technical_terms'])}")
+            
+            elif payload["type"] == "image":
+                # Verify image data exists and is valid
+                if 'image_data' in payload:
+                    try:
+                        # Verify image data can be decoded
+                        base64.b64decode(payload['image_data'])
+                        relevant_images.append(payload)
+                        
+                        context.append(f"\nImage reference: {payload.get('image_name', 'Unnamed Image')}")
+                        context.append(f"From {payload['file_name']}, page {payload['page']}:")
+                        context.append(f"Image context: {payload.get('surrounding_text', 'No context available')}")
+                    except Exception as e:
+                        logger.error(f"Invalid image data in payload: {e}")
+                        continue
+
+        # Generate answer
+        answer = self._generate_answer(question, "\n".join(context))
+        
+        # Log image retrieval stats
+        logger.info(f"Retrieved {len(relevant_images)} images for question: {question}")
+        
+        return answer, relevant_images
+
+    except Exception as e:
+        logger.error(f"Error in RAG pipeline: {e}")
+        return "Sorry, there was an error processing your question.", []
 
     def _search_context(self, question: str):
         query_embedding = self.embedding_model.encode(question).tolist()
@@ -551,46 +591,66 @@ class RAGPipeline:
             return "Sorry, there was an error generating the answer."
 
 def display_image(image_data: Dict[str, Any], caption: str):
-    """Display image with zoom functionality"""
+    """Enhanced image display function with better error handling and debugging"""
     try:
-        if 'image_data' not in image_data:
-            st.warning(f"No image data available for: {caption}")
+        # Debug information
+        st.write(f"Debug: Attempting to display image - {caption}")
+        if not isinstance(image_data, dict):
+            st.error(f"Invalid image data type: {type(image_data)}")
             return
 
-        # Create columns for layout
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            # Display image info
-            st.write(f"**{caption}**")
-            st.write(f"Source: {image_data.get('file_name', 'Unknown')}, "
-                    f"Page: {image_data.get('page', 'Unknown')}")
-            
-            # Display image
+        # Check for required image data
+        if 'image_data' not in image_data:
+            st.error(f"No image data found for: {caption}")
+            st.write("Available keys:", list(image_data.keys()))
+            return
+
+        try:
+            # Decode and display image
             img_bytes = base64.b64decode(image_data['image_data'])
             img = Image.open(io.BytesIO(img_bytes))
-            st.image(img, use_column_width=True)
-        
-        with col2:
-            # Add zoom functionality
-            zoom_key = f"zoom_{caption}"
-            if st.button(f"🔍 Zoom", key=f"zoom_button_{caption}"):
-                st.session_state[zoom_key] = not st.session_state.get(zoom_key, False)
             
-            if st.session_state.get(zoom_key, False):
-                st.image(img, width=800)
+            # Create columns for layout
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                # Display image info
+                st.markdown(f"### {caption}")
+                st.markdown(f"**Source**: {image_data.get('file_name', 'Unknown')}")
+                st.markdown(f"**Page**: {image_data.get('page', 'Unknown')}")
+                
+                # Display image
+                st.image(img, use_column_width=True)
+            
+            with col2:
+                # Add zoom functionality
+                zoom_key = f"zoom_{caption}"
+                if st.button("🔍 Zoom", key=f"zoom_button_{caption}"):
+                    st.session_state[zoom_key] = not st.session_state.get(zoom_key, False)
+                
+                if st.session_state.get(zoom_key, False):
+                    st.image(img, width=800)
 
-        # Show metadata in expander
-        with st.expander("📑 Image Details"):
-            if 'surrounding_text' in image_data:
-                st.write("Context:", image_data['surrounding_text'])
-            if 'technical_terms' in image_data and image_data['technical_terms']:
-                st.write("Technical Terms:", ", ".join(image_data['technical_terms']))
+            # Show metadata in expander
+            with st.expander("📑 Image Details"):
+                if 'surrounding_text' in image_data:
+                    st.markdown("**Context:**")
+                    st.write(image_data['surrounding_text'])
+                if 'technical_terms' in image_data and image_data['technical_terms']:
+                    st.markdown("**Technical Terms:**")
+                    st.write(", ".join(image_data['technical_terms']))
+                if 'entities' in image_data and image_data['entities']:
+                    st.markdown("**Entities:**")
+                    st.write(", ".join(image_data['entities']))
 
+        except Exception as e:
+            st.error(f"Error processing image: {str(e)}")
+            st.write("Image Data Keys:", list(image_data.keys()))
+            
     except Exception as e:
+        st.error(f"Error in display_image: {str(e)}")
         logger.error(f"Error displaying image {caption}: {e}")
-        st.warning(f"Could not display image: {caption}")
-
+        
 def create_streamlit_ui():
     """Create the main Streamlit interface"""
     st.set_page_config(
