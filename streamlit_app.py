@@ -23,132 +23,81 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 import nltk
 from transformers import pipeline
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Any
 import json
-from datetime import datetime
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('rag_system.log'),
-        logging.StreamHandler()
-    ]
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class SessionState:
-    """Manages Streamlit session state"""
-    @staticmethod
-    def init():
-        if 'processed_files' not in st.session_state:
-            st.session_state.processed_files = set()
-        if 'zoomed_images' not in st.session_state:
-            st.session_state.zoomed_images = {}
-        if 'chat_history' not in st.session_state:
-            st.session_state.chat_history = []
-        if 'error_log' not in st.session_state:
-            st.session_state.error_log = []
-        if 'debug_mode' not in st.session_state:
-            st.session_state.debug_mode = False
+# Configure session state
+def init_session_state():
+    if 'processed_files' not in st.session_state:
+        st.session_state.processed_files = set()
+    if 'zoomed_images' not in st.session_state:
+        st.session_state.zoomed_images = {}
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
 
-    @staticmethod
-    def add_error(error: str):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        st.session_state.error_log.append(f"{timestamp}: {error}")
-        logger.error(error)
+# Initialize NLTK
+def setup_nltk():
+    nltk.data.path.append('/tmp/nltk_data')
+    try:
+        nltk.download('punkt', quiet=True, download_dir='/tmp/nltk_data')
+        nltk.download('averaged_perceptron_tagger', quiet=True, download_dir='/tmp/nltk_data')
+        nltk.download('maxent_ne_chunker', quiet=True, download_dir='/tmp/nltk_data')
+        nltk.download('words', quiet=True, download_dir='/tmp/nltk_data')
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to download NLTK data: {e}")
+        return False
 
-class ModelLoader:
-    """Handles loading and caching of ML models"""
-    @staticmethod
-    @st.cache_resource
-    def load_embedding_model():
-        try:
-            return SentenceTransformer('all-MiniLM-L6-v2')
-        except Exception as e:
-            error_msg = f"Error loading embedding model: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            raise
+# Load models
+@st.cache_resource
+def load_models():
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    ner_model = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
+    return embedding_model, ner_model
 
-    @staticmethod
-    @st.cache_resource
-    def load_ner_model():
-        try:
-            return pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english")
-        except Exception as e:
-            error_msg = f"Error loading NER model: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            raise
+# Initialize clients
+def init_clients():
+    try:
+        minio_client = Minio(
+            st.secrets["R2_ENDPOINT"].replace("https://", ""),
+            access_key=st.secrets["R2_ACCESS_KEY"],
+            secret_key=st.secrets["R2_SECRET_KEY"],
+            secure=True
+        )
+    except Exception as e:
+        logger.error(f"MinIO initialization failed: {e}")
+        minio_client = None
 
-    @staticmethod
-    def setup_nltk():
-        try:
-            nltk.data.path.append('/tmp/nltk_data')
-            required_packages = ['punkt', 'averaged_perceptron_tagger', 
-                               'maxent_ne_chunker', 'words']
-            
-            for package in required_packages:
-                nltk.download(package, quiet=True, download_dir='/tmp/nltk_data')
-            return True
-        except Exception as e:
-            error_msg = f"Failed to setup NLTK: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            return False
+    try:
+        qdrant_client = QdrantClient(
+            url=st.secrets["qdrant"]["url"],
+            api_key=st.secrets["qdrant"]["api_key"]
+        )
+    except Exception as e:
+        logger.error(f"Qdrant initialization failed: {e}")
+        qdrant_client = None
 
-class ClientManager:
-    """Manages MinIO and Qdrant clients"""
-    @staticmethod
-    def initialize_clients():
-        try:
-            # Initialize MinIO client
-            minio_client = Minio(
-                st.secrets["R2_ENDPOINT"].replace("https://", ""),
-                access_key=st.secrets["R2_ACCESS_KEY"],
-                secret_key=st.secrets["R2_SECRET_KEY"],
-                secure=True
-            )
-            
-            # Initialize Qdrant client
-            qdrant_client = QdrantClient(
-                url=st.secrets["qdrant"]["url"],
-                api_key=st.secrets["qdrant"]["api_key"]
-            )
-            
-            return minio_client, qdrant_client
-
-        except Exception as e:
-            error_msg = f"Error initializing clients: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            return None, None
+    return minio_client, qdrant_client
 
 class ImageProcessor:
-    """Handles image processing and extraction"""
     def __init__(self, zoom_factor: int = 4):
         self.zoom_factor = zoom_factor
 
     def extract_images_from_page(self, page: fitz.Page, page_num: int) -> List[Dict[str, Any]]:
         try:
-            # Create matrix for high-quality rendering
             mat = fitz.Matrix(self.zoom_factor, self.zoom_factor)
             pix = page.get_pixmap(matrix=mat)
-            
-            # Convert to PIL Image
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             img_np = np.array(img)
             
-            # Image processing for contour detection
+            # Image processing
             gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
             _, binary = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
-            contours, _ = cv2.findContours(
-                255 - binary, 
-                cv2.RETR_EXTERNAL, 
-                cv2.CHAIN_APPROX_SIMPLE
-            )
+            contours, _ = cv2.findContours(255 - binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
             images = []
             min_size = 100 * self.zoom_factor / 2
@@ -156,11 +105,10 @@ class ImageProcessor:
             for i, contour in enumerate(contours):
                 x, y, w, h = cv2.boundingRect(contour)
                 if w > min_size and h > min_size:
-                    # Extract ROI
                     roi = img_np[y:y+h, x:x+w]
                     pil_img = Image.fromarray(roi)
                     
-                    # Convert to bytes with high quality
+                    # Convert to high-quality bytes
                     img_byte_arr = io.BytesIO()
                     pil_img.save(img_byte_arr, format='PNG', quality=95)
                     img_byte_arr = img_byte_arr.getvalue()
@@ -169,15 +117,13 @@ class ImageProcessor:
                         "name": f"Page {page_num + 1}, Image {i + 1}",
                         "image_data": base64.b64encode(img_byte_arr).decode('utf-8'),
                         "bbox": (x, y, w, h),
+                        "pil_img": pil_img,
                         "size": (w, h)
                     })
             
             return images
-
         except Exception as e:
-            error_msg = f"Error extracting images from page {page_num}: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
+            logger.error(f"Error extracting images from page {page_num}: {e}")
             return []
 
     def extract_text_around_image(self, page: fitz.Page, bbox: Tuple[int, int, int, int], 
@@ -187,15 +133,13 @@ class ImageProcessor:
             rect = fitz.Rect(x/2-margin, y/2-margin, (x+w)/2+margin, (y+h)/2+margin)
             return page.get_text("text", clip=rect)
         except Exception as e:
-            error_msg = f"Error extracting text around image: {e}"
-            logger.error(error_msg)
+            logger.error(f"Error extracting text around image: {e}")
             return ""
 
 class TextProcessor:
-    """Handles text processing and entity extraction"""
     def __init__(self, ner_model):
         self.ner_model = ner_model
-
+        
     def process_text(self, text: str) -> Dict[str, Any]:
         try:
             # Basic text processing
@@ -205,270 +149,70 @@ class TextProcessor:
             
             # Named entity recognition
             ner_results = self.ner_model(text)
-            named_entities = [entity['word'] for entity in ner_results 
-                            if entity['entity'] != 'O']
+            named_entities = [entity['word'] for entity in ner_results if entity['entity'] != 'O']
             
-            # Technical term extraction
-            technical_terms = self._extract_technical_terms(tagged)
-            
-            # Combine all entities
-            all_entities = list(set(named_entities + technical_terms))
+            # Combine with POS-based entities
+            pos_entities = [word for word, pos in tagged if pos in ['NNP', 'NNPS']]
+            all_entities = list(set(named_entities + pos_entities))
             
             return {
                 'full_text': text,
                 'sentences': sentences,
                 'entities': all_entities,
-                'technical_terms': technical_terms
+                'tokens': tokens
             }
         except Exception as e:
-            error_msg = f"Error in text processing: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
+            logger.error(f"Error in text processing: {e}")
             return {
                 'full_text': text,
                 'sentences': [text],
                 'entities': [],
-                'technical_terms': []
+                'tokens': text.split()
             }
 
-    def _extract_technical_terms(self, tagged_tokens: List[Tuple[str, str]]) -> List[str]:
-        """Extract technical terms based on POS patterns"""
-        technical_terms = []
-        i = 0
-        while i < len(tagged_tokens) - 1:
-            current_token, current_pos = tagged_tokens[i]
-            next_token, next_pos = tagged_tokens[i + 1]
-            
-            if current_pos.startswith('NN') and next_pos.startswith('NN'):
-                technical_terms.append(f"{current_token} {next_token}")
-                i += 2
-            elif current_pos.startswith('JJ') and next_pos.startswith('NN'):
-                technical_terms.append(f"{current_token} {next_token}")
-                i += 2
-            else:
-                i += 1
-        
-        return technical_terms
-
-class TopicModeler:
-    """Handles topic modeling and text classification"""
+class TopicModeling:
     def __init__(self, num_topics: int = 5, max_features: int = 100):
         self.num_topics = num_topics
         self.max_features = max_features
-        self.vectorizer = TfidfVectorizer(
-            max_features=max_features,
-            stop_words='english'
+        
+    def compute_topics(self, texts: List[str]) -> Tuple[Any, List[str]]:
+        vectorizer = TfidfVectorizer(max_features=self.max_features)
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        
+        lda = LatentDirichletAllocation(
+            n_components=self.num_topics, 
+            random_state=42
         )
+        lda.fit(tfidf_matrix)
+        
+        return lda, vectorizer.get_feature_names_out()
 
-    def analyze_text(self, texts: List[str]) -> Dict[str, Any]:
-        try:
-            # Compute TF-IDF
-            tfidf_matrix = self.vectorizer.fit_transform(texts)
-            
-            # Perform LDA
-            lda = LatentDirichletAllocation(
-                n_components=self.num_topics,
-                random_state=42,
-                n_jobs=-1
-            )
-            topic_distribution = lda.fit_transform(tfidf_matrix)
-            
-            # Get feature names
-            feature_names = self.vectorizer.get_feature_names_out()
-            
-            # Get top keywords for each topic
-            topics = []
-            for topic_idx, topic in enumerate(lda.components_):
-                top_words = [feature_names[i] 
-                           for i in topic.argsort()[:-5-1:-1]]
-                topics.append(top_words)
-            
-            return {
-                'topic_distribution': topic_distribution,
-                'topics': topics,
-                'feature_names': feature_names
-            }
-        except Exception as e:
-            error_msg = f"Error in topic modeling: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            return {
-                'topic_distribution': np.zeros((len(texts), self.num_topics)),
-                'topics': [[] for _ in range(self.num_topics)],
-                'feature_names': []
-            }
-
-def display_image(image_data: Dict[str, Any], caption: str):
-    """Enhanced image display function with better error handling and debugging"""
+def display_image_in_streamlit(image_data: str, caption: str):
     try:
-        if st.session_state.debug_mode:
-            st.write(f"Debug: Attempting to display image - {caption}")
-            st.write("Image data keys:", list(image_data.keys()))
-
-        # Validate image data
-        if not isinstance(image_data, dict):
-            raise ValueError(f"Invalid image data type: {type(image_data)}")
-
-        if 'image_data' not in image_data:
-            raise KeyError(f"No image data found for: {caption}")
-
-        # Decode and display image
-        img_bytes = base64.b64decode(image_data['image_data'])
+        img_bytes = base64.b64decode(image_data)
         img = Image.open(io.BytesIO(img_bytes))
         
-        # Create columns for layout
         col1, col2 = st.columns([3, 1])
         
         with col1:
-            # Display image info
-            st.markdown(f"### {caption}")
-            st.markdown(f"**Source**: {image_data.get('file_name', 'Unknown')}")
-            st.markdown(f"**Page**: {image_data.get('page', 'Unknown')}")
-            
-            # Display image
-            st.image(img, use_column_width=True)
+            st.image(img, caption=caption, use_column_width=True)
         
         with col2:
-            # Add zoom functionality
             zoom_key = f"zoom_{caption}"
-            if st.button("🔍 Zoom", key=f"zoom_button_{caption}"):
+            if st.button(f"Zoom {caption}"):
                 st.session_state[zoom_key] = not st.session_state.get(zoom_key, False)
             
             if st.session_state.get(zoom_key, False):
-                st.image(img, width=800)
-
-        # Show metadata in expander
-        with st.expander("📑 Image Details"):
-            if 'surrounding_text' in image_data:
-                st.markdown("**Context:**")
-                st.write(image_data['surrounding_text'])
-            if 'technical_terms' in image_data and image_data['technical_terms']:
-                st.markdown("**Technical Terms:**")
-                st.write(", ".join(image_data['technical_terms']))
-            if 'entities' in image_data and image_data['entities']:
-                st.markdown("**Entities:**")
-                st.write(", ".join(image_data['entities']))
-
+                st.image(img, caption="Zoomed view", width=800)
+        
+        return True
     except Exception as e:
-        error_msg = f"Error displaying image {caption}: {e}"
-        logger.error(error_msg)
-        SessionState.add_error(error_msg)
-        st.error(f"Error displaying image: {caption}")
-        if st.session_state.debug_mode:
-            st.write("Full error:", str(e))
-            st.write("Image data keys:", list(image_data.keys()) if isinstance(image_data, dict) else "Invalid image data")
-
-class RAGPipeline:
-    """Handles the Retrieval-Augmented Generation pipeline"""
-    def __init__(self, qdrant_client, embedding_model):
-        self.qdrant_client = qdrant_client
-        self.embedding_model = embedding_model
-        openai.api_key = self._get_api_key()
-
-    def _get_api_key(self) -> str:
-        """Get OpenAI API key from secrets or environment"""
-        try:
-            if 'openai' in st.secrets:
-                return st.secrets['openai']['api_key']
-            api_key = os.getenv('OPENAI_API_KEY')
-            if not api_key:
-                raise ValueError("OpenAI API key not found")
-            return api_key
-        except Exception as e:
-            error_msg = f"Error getting OpenAI API key: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            raise
-
-    def get_answer(self, question: str) -> Tuple[str, List[Dict[str, Any]]]:
-        try:
-            # Get embeddings for the question
-            query_embedding = self.embedding_model.encode(question).tolist()
-            
-            # Search for relevant content
-            search_results = self.qdrant_client.search(
-                collection_name="manual_vectors",
-                query_vector=query_embedding,
-                limit=15,
-                query_filter=Filter(
-                    must=[FieldCondition(key="page", range=Range(gte=1))]
-                )
-            )
-
-            # Process results
-            context = []
-            relevant_images = []
-            
-            for result in search_results:
-                payload = result.payload
-                
-                if payload["type"] == "text":
-                    context.append(f"From {payload['file_name']}, page {payload['page']}:")
-                    context.append(payload['content'])
-                    if 'technical_terms' in payload and payload['technical_terms']:
-                        context.append(f"Technical terms: {', '.join(payload['technical_terms'])}")
-                
-                elif payload["type"] == "image":
-                    # Verify image data exists and is valid
-                    if 'image_data' in payload:
-                        try:
-                            # Verify image data can be decoded
-                            base64.b64decode(payload['image_data'])
-                            relevant_images.append(payload)
-                            
-                            context.append(f"\nImage reference: {payload.get('image_name', 'Unnamed Image')}")
-                            context.append(f"From {payload['file_name']}, page {payload['page']}:")
-                            context.append(f"Image context: {payload.get('surrounding_text', 'No context available')}")
-                        except Exception as e:
-                            logger.error(f"Invalid image data in payload: {e}")
-                            continue
-
-            # Generate answer
-            answer = self._generate_answer(question, "\n".join(context))
-            
-            # Log retrieval stats
-            logger.info(f"Retrieved {len(relevant_images)} images for question: {question}")
-            
-            return answer, relevant_images
-
-        except Exception as e:
-            error_msg = f"Error in RAG pipeline: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            return "Sorry, there was an error processing your question.", []
-
-    def _generate_answer(self, question: str, context: str) -> str:
-        try:
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": """You are a technical documentation assistant specialized in engineering manuals. When answering:
-                        1. Provide clear, numbered step-by-step instructions when appropriate
-                        2. Reference specific images by their exact names when relevant
-                        3. Always cite page numbers and document names for each piece of information
-                        4. Use technical terminology accurately and consistently
-                        5. If information is incomplete, clearly state what's missing
-                        6. When describing procedures, include relevant safety warnings
-                        7. Organize complex information into clearly labeled sections
-                        8. When technical specifications are mentioned, highlight them clearly"""},
-                    {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
-                ],
-                temperature=0.7,
-                max_tokens=1000
-            )
-            
-            return response.choices[0].message['content'].strip()
-            
-        except Exception as e:
-            error_msg = f"Error generating answer: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            return "Sorry, there was an error generating the answer."
+        logger.error(f"Error displaying image: {e}")
+        st.error(f"Failed to display image: {caption}")
+        return False
 
 class DocumentProcessor:
-    """Handles document processing and vectorization"""
-    def __init__(self, minio_client, qdrant_client, embedding_model, 
-                 text_processor, image_processor, topic_modeler):
+    def __init__(self, minio_client, qdrant_client, embedding_model, text_processor, image_processor, topic_modeler):
         self.minio_client = minio_client
         self.qdrant_client = qdrant_client
         self.embedding_model = embedding_model
@@ -476,284 +220,310 @@ class DocumentProcessor:
         self.image_processor = image_processor
         self.topic_modeler = topic_modeler
 
-    def process_documents(self) -> bool:
-        try:
-            # List all PDF files
-            objects = self.minio_client.list_objects(st.secrets["R2_BUCKET_NAME"])
-            pdf_files = [obj.object_name for obj in objects 
-                        if obj.object_name.endswith('.pdf')]
-            
-            if not pdf_files:
-                st.warning("No PDF files found in storage.")
-                return False
-
-            # Recreate collection
-            self._recreate_collection()
-            
-            # Process each PDF
-            progress_text = st.empty()
-            progress_bar = st.progress(0)
-            
-            for idx, pdf_file in enumerate(pdf_files):
-                progress = idx / len(pdf_files)
-                progress_bar.progress(progress)
-                progress_text.text(f"Processing file {idx + 1}/{len(pdf_files)}: {pdf_file}")
-                
-                if pdf_file not in st.session_state.processed_files:
-                    success = self._process_pdf(pdf_file)
-                    if success:
-                        st.session_state.processed_files.add(pdf_file)
-            
-            progress_bar.progress(1.0)
-            progress_text.text("Processing completed!")
-            return True
-
-        except Exception as e:
-            error_msg = f"Error processing documents: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            return False
-
-    def _recreate_collection(self):
+    def recreate_collection(self) -> bool:
         try:
             self.qdrant_client.delete_collection("manual_vectors")
             self.qdrant_client.create_collection(
                 collection_name="manual_vectors",
                 vectors_config=VectorParams(size=384, distance="Cosine")
             )
-            logger.info("Vector collection recreated successfully")
+            return True
         except Exception as e:
-            error_msg = f"Error recreating collection: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
-            raise
+            logger.error(f"Error recreating collection: {e}")
+            return False
 
-    def _process_pdf(self, pdf_file_name: str, chunk_size: int = 10) -> bool:
+    def process_pdf(self, pdf_file_name: str, chunk_size: int = 10) -> bool:
         try:
+            # Get PDF from MinIO
             response = self.minio_client.get_object(
-                st.secrets["R2_BUCKET_NAME"],
+                st.secrets["R2_BUCKET_NAME"], 
                 pdf_file_name
             )
             pdf_content = response.read()
             doc = fitz.open(stream=pdf_content, filetype="pdf")
 
+            st.write(f"Processing: {pdf_file_name}")
+            progress_bar = st.progress(0)
+            
             all_text = []
             total_vectors = 0
             total_images = 0
 
-            chunk_progress = st.progress(0)
-            chunk_status = st.empty()
-
+            # Process PDF in chunks
             for chunk_start in range(0, len(doc), chunk_size):
                 chunk_end = min(chunk_start + chunk_size, len(doc))
                 progress = chunk_start / len(doc)
-                chunk_progress.progress(progress)
-                chunk_status.text(f"Processing pages {chunk_start + 1} to {chunk_end}")
+                progress_bar.progress(progress)
 
-                chunk_results = self._process_chunk(
-                    doc, chunk_start, chunk_end, pdf_file_name, all_text
-                )
-                
-                total_vectors += chunk_results['num_vectors']
-                total_images += chunk_results['num_images']
-                
+                vectors = []
+                chunk_images = []
+
+                # Process each page in chunk
+                for page_num in range(chunk_start, chunk_end):
+                    try:
+                        page = doc[page_num]
+                        
+                        # Process text
+                        text = page.get_text()
+                        all_text.append(text)
+                        processed_text = self.text_processor.process_text(text)
+                        
+                        # Create text vectors
+                        for sentence in processed_text['sentences']:
+                            embedding = self.embedding_model.encode(sentence).tolist()
+                            vectors.append(PointStruct(
+                                id=str(uuid.uuid4()),
+                                vector=embedding,
+                                payload={
+                                    "type": "text",
+                                    "page": page_num + 1,
+                                    "content": sentence,
+                                    "entities": processed_text['entities'],
+                                    "file_name": pdf_file_name
+                                }
+                            ))
+
+                        # Process images
+                        images = self.image_processor.extract_images_from_page(page, page_num)
+                        for img_data in images:
+                            surrounding_text = self.image_processor.extract_text_around_image(
+                                page, 
+                                img_data["bbox"]
+                            )
+                            processed_surrounding_text = self.text_processor.process_text(surrounding_text)
+                            
+                            embedding = self.embedding_model.encode(
+                                f"Image metadata: {surrounding_text}"
+                            ).tolist()
+                            
+                            vectors.append(PointStruct(
+                                id=str(uuid.uuid4()),
+                                vector=embedding,
+                                payload={
+                                    "type": "image",
+                                    "page": page_num + 1,
+                                    "content": f"Image metadata: {surrounding_text}",
+                                    "surrounding_text": surrounding_text,
+                                    "entities": processed_surrounding_text['entities'],
+                                    "file_name": pdf_file_name,
+                                    "image_name": img_data["name"],
+                                    "image_data": img_data["image_data"],
+                                    "size": img_data["size"]
+                                }
+                            ))
+                            chunk_images.append((img_data["name"], img_data["pil_img"]))
+
+                    except Exception as e:
+                        logger.error(f"Error processing page {page_num + 1}: {e}")
+                        continue
+
+                # Compute topics for the chunk
+                try:
+                    if all_text:
+                        lda_model, feature_names = self.topic_modeler.compute_topics(all_text)
+                        for vector in vectors:
+                            if vector.payload["type"] == "text":
+                                text_idx = all_text.index(vector.payload["content"])
+                                topic_dist = lda_model.transform([all_text[text_idx]])[0]
+                                vector.payload["topics"] = topic_dist.tolist()
+                except Exception as e:
+                    logger.warning(f"Error in topic modeling: {e}")
+
+                # Store vectors in Qdrant
+                try:
+                    self.qdrant_client.upsert(
+                        collection_name="manual_vectors",
+                        points=vectors
+                    )
+                    total_vectors += len(vectors)
+                    total_images += len(chunk_images)
+                except Exception as e:
+                    logger.error(f"Error storing vectors: {e}")
+
+                # Display sample images
+                self._display_sample_images(chunk_images)
                 gc.collect()
 
-            chunk_progress.progress(1.0)
-            chunk_status.text(f"Processed {total_vectors} vectors and {total_images} images")
-            doc.close()
-            
+            progress_bar.progress(1.0)
+            st.success(f"Processed {total_vectors} vectors and {total_images} images")
             return True
 
         except Exception as e:
-            error_msg = f"Error processing PDF {pdf_file_name}: {e}"
-            logger.error(error_msg)
-            SessionState.add_error(error_msg)
+            logger.error(f"Error processing PDF {pdf_file_name}: {e}")
             return False
 
-    def _process_chunk(self, doc, start: int, end: int, 
-                      pdf_file_name: str, all_text: List[str]) -> Dict[str, int]:
-        vectors = []
-        chunk_images = []
+    def _display_sample_images(self, images: List[Tuple[str, Image.Image]]):
+        if not images:
+            return
+            
+        st.write("Sample images from current chunk:")
+        display_images = images[:4] if len(images) <= 4 else random.sample(images, 4)
+        cols = st.columns(4)
         
-        for page_num in range(start, end):
-            try:
-                page = doc[page_num]
-                text = page.get_text()
-                all_text.append(text)
-                
-                # Process text
-                processed_text = self.text_processor.process_text(text)
-                for sentence in processed_text['sentences']:
-                    embedding = self.embedding_model.encode(sentence).tolist()
-                    vectors.append(PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector=embedding,
-                        payload={
-                            "type": "text",
-                            "page": page_num + 1,
-                            "content": sentence,
-                            "entities": processed_text['entities'],
-                            "technical_terms": processed_text['technical_terms'],
-                            "file_name": pdf_file_name
-                        }
-                    ))
+        for idx, (img_name, img) in enumerate(display_images):
+            with cols[idx % 4]:
+                st.image(img, caption=img_name, use_column_width=True)
 
-                # Process images
-                images = self.image_processor.extract_images_from_page(page, page_num)
-                for img_data in images:
-                    surrounding_text = self.image_processor.extract_text_around_image(
-                        page, img_data["bbox"]
-                    )
-                    processed_surrounding_text = self.text_processor.process_text(
-                        surrounding_text
-                    )
-                    
-                    embedding = self.embedding_model.encode(
-                        f"Image metadata: {surrounding_text}"
-                    ).tolist()
-                    
-                    vectors.append(PointStruct(
-                        id=str(uuid.uuid4()),
-                        vector=embedding,
-                        payload={
-                            "type": "image",
-                            "page": page_num + 1,
-                            "content": f"Image metadata: {surrounding_text}",
-                            "surrounding_text": surrounding_text,
-                            "entities": processed_surrounding_text['entities'],
-                            "technical_terms": processed_surrounding_text['technical_terms'],
-                            "file_name": pdf_file_name,
-                            "image_name": img_data["name"],
-                            "image_data": img_data["image_data"],
-                            "size": img_data["size"]
-                        }
-                    ))
-                    chunk_images.append(img_data)
+class RAGPipeline:
+    def __init__(self, qdrant_client, embedding_model):
+        self.qdrant_client = qdrant_client
+        self.embedding_model = embedding_model
+        openai.api_key = self._get_api_key()
 
-            except Exception as e:
-                error_msg = f"Error processing page {page_num}: {e}"
-                logger.error(error_msg)
-                SessionState.add_error(error_msg)
-                continue
+    def _get_api_key(self):
+        if 'openai' in st.secrets:
+            return st.secrets['openai']['api_key']
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            raise ValueError("OpenAI API key not found")
+        return api_key
 
-        # Store vectors in Qdrant
-        if vectors:
-            try:
-                self.qdrant_client.upsert(
-                    collection_name="manual_vectors",
-                    points=vectors
-                )
-            except Exception as e:
-                error_msg = f"Error storing vectors: {e}"
-                logger.error(error_msg)
-                SessionState.add_error(error_msg)
+    def get_answer(self, question: str, chat_history: List[Dict] = None) -> Tuple[str, List[Dict]]:
+        # Get relevant context
+        query_embedding = self.embedding_model.encode(question).tolist()
+        search_results = self.qdrant_client.search(
+            collection_name="manual_vectors",
+            query_vector=query_embedding,
+            limit=15,
+            query_filter=Filter(
+                must=[FieldCondition(key="page", range=Range(gte=1))]
+            )
+        )
 
-        return {
-            'num_vectors': len(vectors),
-            'num_images': len(chunk_images)
-        }
+        # Process results
+        context = ""
+        relevant_images = []
+        
+        for result in search_results:
+            payload = result.payload
+            if payload["type"] == "text":
+                context += f"From {payload['file_name']}, page {payload['page']}:\n"
+                context += f"{payload['content']}\n"
+                if 'topics' in payload:
+                    context += f"Topics: {payload['topics']}\n"
+            elif payload["type"] == "image":
+                relevant_images.append(payload)
+                context += f"\nImage reference: {payload['image_name']}"
+                context += f" from {payload['file_name']}, page {payload['page']}:\n"
+                context += f"Image context: {payload['surrounding_text']}\n"
+
+        # Prepare chat messages
+        messages = [
+            {"role": "system", "content": """You are a technical documentation assistant. When answering:
+                1. Provide clear step-by-step instructions when available
+                2. Reference specific images by their names when relevant
+                3. Cite page numbers and document names
+                4. Use technical terminology accurately
+                5. If information is incomplete, clearly state what's missing"""}
+        ]
+        
+        if chat_history:
+            messages.extend(chat_history)
+            
+        messages.extend([
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+        ])
+
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=messages,
+                temperature=0.7
+            )
+            answer = response.choices[0].message['content'].strip()
+            return answer, relevant_images
+        except Exception as e:
+            logger.error(f"Error getting GPT response: {e}")
+            return "Sorry, there was an error processing your question.", []
 
 def create_streamlit_ui():
-    """Create the main Streamlit interface"""
-    st.set_page_config(
-        page_title="Technical Documentation Assistant",
-        page_icon="📚",
-        layout="wide"
-    )
-
+    st.title('Advanced PDF Processor and Query System')
+    
     # Initialize session state
-    SessionState.init()
+    init_session_state()
+    
+    # Initialize components
+    embedding_model, ner_model = load_models()
+    minio_client, qdrant_client = init_clients()
+    
+    if not all([minio_client, qdrant_client]):
+        st.error("Error initializing clients. Please check your configuration.")
+        return
 
-    # Add debug mode toggle in sidebar
-    st.sidebar.title("Settings")
-    st.session_state.debug_mode = st.sidebar.checkbox("Debug Mode")
+    # Create processor instances
+    text_processor = TextProcessor(ner_model)
+    image_processor = ImageProcessor()
+    topic_modeler = TopicModeling()
+    doc_processor = DocumentProcessor(
+        minio_client, qdrant_client, embedding_model,
+        text_processor, image_processor, topic_modeler
+    )
+    rag_pipeline = RAGPipeline(qdrant_client, embedding_model)
 
-    try:
-        # Load models
-        with st.spinner("Loading models..."):
-            embedding_model = ModelLoader.load_embedding_model()
-            ner_model = ModelLoader.load_ner_model()
-            ModelLoader.setup_nltk()
+    # Sidebar
+    st.sidebar.title("Navigation")
+    page = st.sidebar.radio("Choose a page:", ["Process PDFs", "Query Documents"])
 
-        # Initialize clients
-        minio_client, qdrant_client = ClientManager.initialize_clients()
+    if page == "Process PDFs":
+        st.header("PDF Processing")
+        if st.button("Process PDFs from Storage"):
+            try:
+                objects = minio_client.list_objects(st.secrets["R2_BUCKET_NAME"])
+                pdf_files = [obj.object_name for obj in objects if obj.object_name.endswith('.pdf')]
+                
+                if not pdf_files:
+                    st.warning("No PDF files found in storage.")
+                    return
+                
+                doc_processor.recreate_collection()
+                
+                for pdf_file in pdf_files:
+                    if pdf_file not in st.session_state.processed_files:
+                        success = doc_processor.process_pdf(pdf_file)
+                        if success:
+                            st.session_state.processed_files.add(pdf_file)
+                
+                st.success("All PDFs processed successfully!")
+            except Exception as e:
+                st.error(f"Error processing PDFs: {e}")
+
+    else:  # Query Documents page
+        st.header("Document Query")
+        question = st.text_input("Enter your question:")
         
-        if not all([minio_client, qdrant_client]):
-            st.error("Error initializing system. Please check the logs.")
-            return
-
-        # Create processor instances
-        text_processor = TextProcessor(ner_model)
-        image_processor = ImageProcessor()
-        topic_modeler = TopicModeler()
-        doc_processor = DocumentProcessor(
-            minio_client, qdrant_client, embedding_model,
-            text_processor, image_processor, topic_modeler
-        )
-        rag_pipeline = RAGPipeline(qdrant_client, embedding_model)
-
-        # Create main navigation
-        st.sidebar.title("Navigation")
-        page = st.sidebar.radio("Choose a page:", ["Process Documents", "Query System"])
-
-        if page == "Process Documents":
-            st.title("Document Processing")
-            st.write("Process technical documentation for the query system.")
-            
-            if st.button("Process Documents"):
-                with st.spinner("Processing documents..."):
-                    success = doc_processor.process_documents()
-                    if success:
-                        st.success("Documents processed successfully!")
-        else:
-            st.title("Query System")
-            st.write("Ask questions about your technical documentation.")
-            
-            # Main query interface
-            question = st.text_input("Enter your question:")
-            
-            if st.button("Get Answer"):
-                if question:
-                    with st.spinner("Processing your question..."):
-                        answer, images = rag_pipeline.get_answer(question)
-                        
-                        st.markdown("### Answer")
-                        st.write(answer)
-                        
-                        if images:
-                            st.markdown("### Relevant Images")
-                            st.write(f"Found {len(images)} relevant images")
+        if st.button("Get Answer"):
+            if question:
+                with st.spinner("Processing your question..."):
+                    answer, images = rag_pipeline.get_answer(
+                        question, 
+                        st.session_state.chat_history
+                    )
+                    
+                    st.write("**Answer:**", answer)
+                    
+                    if images:
+                        st.write("**Relevant Images:**")
+                        for idx, img_data in enumerate(images):
+                            st.write(f"\n### Image {idx + 1}: {img_data['image_name']}")
+                            display_image_in_streamlit(
+                                img_data['image_data'],
+                                f"Image {idx + 1} from page {img_data['page']}"
+                            )
                             
-                            for idx, img_data in enumerate(images, 1):
-                                st.markdown("---")
-                                display_image(
-                                    img_data,
-                                    f"Image {idx} from {img_data.get('file_name', 'Unknown')}"
-                                )
-                        else:
-                            st.info("No relevant images found for this query.")
-                else:
-                    st.error("Please enter a question.")
-
-        # Display error log if any
-        if st.session_state.error_log and st.session_state.debug_mode:
-            with st.expander("System Logs"):
-                for error in st.session_state.error_log:
-                    st.write(error)
-
-    except Exception as e:
-        error_msg = f"Application error: {str(e)}"
-        logger.error(error_msg)
-        SessionState.add_error(error_msg)
-        st.error(error_msg)
-        if st.session_state.debug_mode:
-            st.write("Full error:", traceback.format_exc())
+                            with st.expander("Image Details"):
+                                st.write(f"Source: {img_data['file_name']}, Page: {img_data['page']}")
+                                st.write("Context:", img_data['surrounding_text'])
+                                if img_data['entities']:
+                                    st.write("Entities:", ", ".join(img_data['entities']))
+                    
+                    # Update chat history
+                    st.session_state.chat_history.extend([
+                        {"role": "user", "content": question},
+                        {"role": "assistant", "content": answer}
+                    ])
+            else:
+                st.error("Please enter a question.")
 
 if __name__ == "__main__":
-    try:
-        multiprocessing.freeze_support()
-        create_streamlit_ui()
-    except Exception as e:
-        st.error(f"Application error: {str(e)}")
-        logger.error(f"Application error: {e}")
+    multiprocessing.freeze_support()
+    create_streamlit_ui()
