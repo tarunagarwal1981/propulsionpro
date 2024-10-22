@@ -187,28 +187,63 @@ class TopicModeling:
         
         return lda, vectorizer.get_feature_names_out()
 
-def display_image_in_streamlit(image_data: str, caption: str):
+def display_image_in_streamlit(image_data: Dict[str, Any], caption: str):
+    """
+    Enhanced image display function with better error handling
+    """
     try:
-        img_bytes = base64.b64decode(image_data)
+        # Check if image_data exists and has the required keys
+        if not isinstance(image_data, dict):
+            logger.error(f"Invalid image data type: {type(image_data)}")
+            st.warning(f"Could not display image: {caption} (Invalid data format)")
+            return False
+
+        # If image data is missing, log and show warning
+        if 'image_data' not in image_data:
+            logger.error(f"Missing image data for {caption}")
+            st.warning(f"Image data not available for: {caption}")
+            return False
+
+        # Display image info even if image display fails
+        st.write(f"**{caption}**")
+        st.write(f"Source: {image_data.get('file_name', 'Unknown')}, "
+                f"Page: {image_data.get('page', 'Unknown')}")
+
+        # Try to display the image
+        img_bytes = base64.b64decode(image_data['image_data'])
         img = Image.open(io.BytesIO(img_bytes))
         
         col1, col2 = st.columns([3, 1])
         
         with col1:
-            st.image(img, caption=caption, use_column_width=True)
+            st.image(img, use_column_width=True)
         
         with col2:
             zoom_key = f"zoom_{caption}"
-            if st.button(f"Zoom {caption}"):
+            if st.button(f"🔍 Zoom"):
                 st.session_state[zoom_key] = not st.session_state.get(zoom_key, False)
             
             if st.session_state.get(zoom_key, False):
-                st.image(img, caption="Zoomed view", width=800)
+                st.image(img, width=800)
+
+        # Show additional image metadata in expander
+        with st.expander("📑 Image Details"):
+            if 'surrounding_text' in image_data:
+                st.write("Context:", image_data['surrounding_text'])
+            if 'entities' in image_data and image_data['entities']:
+                st.write("Entities:", ", ".join(image_data['entities']))
         
         return True
+
     except Exception as e:
-        logger.error(f"Error displaying image: {e}")
-        st.error(f"Failed to display image: {caption}")
+        logger.error(f"Error displaying image {caption}: {e}")
+        st.warning(f"Could not display image: {caption}")
+        # Show whatever metadata we have even if image display failed
+        if isinstance(image_data, dict):
+            with st.expander(f"📑 Available Information for {caption}"):
+                for key, value in image_data.items():
+                    if key != 'image_data' and value:  # Don't show binary data
+                        st.write(f"{key}: {value}")
         return False
 
 class DocumentProcessor:
@@ -365,18 +400,85 @@ class DocumentProcessor:
                 st.image(img, caption=img_name, use_column_width=True)
 
 class RAGPipeline:
-    def __init__(self, qdrant_client, embedding_model):
-        self.qdrant_client = qdrant_client
-        self.embedding_model = embedding_model
-        openai.api_key = self._get_api_key()
+    def get_answer(self, question: str, chat_history: List[Dict] = None) -> Tuple[str, List[Dict]]:
+        try:
+            # Get relevant context
+            query_embedding = self.embedding_model.encode(question).tolist()
+            search_results = self.qdrant_client.search(
+                collection_name="manual_vectors",
+                query_vector=query_embedding,
+                limit=15,
+                query_filter=Filter(
+                    must=[FieldCondition(key="page", range=Range(gte=1))]
+                )
+            )
 
-    def _get_api_key(self):
-        if 'openai' in st.secrets:
-            return st.secrets['openai']['api_key']
-        api_key = os.getenv('OPENAI_API_KEY')
-        if not api_key:
-            raise ValueError("OpenAI API key not found")
-        return api_key
+            # Process results
+            context = ""
+            relevant_images = []
+            
+            for result in search_results:
+                payload = result.payload
+                if payload["type"] == "text":
+                    context += f"From {payload['file_name']}, page {payload['page']}:\n"
+                    context += f"{payload['content']}\n"
+                    if 'topics' in payload:
+                        context += f"Topics: {payload['topics']}\n"
+                elif payload["type"] == "image":
+                    # Verify image data exists before adding to relevant images
+                    if 'image_data' in payload:
+                        relevant_images.append(payload)
+                        context += f"\nImage reference: {payload.get('image_name', 'Unnamed Image')}"
+                        context += f" from {payload.get('file_name', 'Unknown')}, page {payload.get('page', 'Unknown')}:\n"
+                        context += f"Image context: {payload.get('surrounding_text', 'No context available')}\n"
+
+            # Generate answer
+            messages = [
+                {"role": "system", "content": """You are a technical documentation assistant. When answering:
+                    1. Provide clear step-by-step instructions when available
+                    2. Reference specific images by their names when relevant
+                    3. Cite page numbers and document names
+                    4. Use technical terminology accurately
+                    5. If information is incomplete, clearly state what's missing"""}
+            ]
+            
+            if chat_history:
+                messages.extend(chat_history)
+                
+            messages.extend([
+                {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+            ])
+
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=messages,
+                temperature=0.7
+            )
+            answer = response.choices[0].message['content'].strip()
+            return answer, relevant_images
+
+        except Exception as e:
+            logger.error(f"Error in RAG pipeline: {e}")
+            return "Sorry, there was an error processing your question.", []
+
+def display_query_results(answer: str, images: List[Dict[str, Any]]):
+    """
+    Display query results with better error handling
+    """
+    st.write("**Answer:**", answer)
+    
+    if images:
+        st.write("**Relevant Images:**")
+        for idx, img_data in enumerate(images, 1):
+            try:
+                display_image_in_streamlit(
+                    img_data,
+                    f"Image {idx} from {img_data.get('file_name', 'Unknown')}, "
+                    f"Page {img_data.get('page', 'Unknown')}"
+                )
+            except Exception as e:
+                logger.error(f"Error displaying image {idx}: {e}")
+                st.warning(f"Could not display image {idx}")
 
     def get_answer(self, question: str, chat_history: List[Dict] = None) -> Tuple[str, List[Dict]]:
         # Get relevant context
