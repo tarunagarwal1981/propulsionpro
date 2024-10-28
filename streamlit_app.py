@@ -25,6 +25,7 @@ import nltk
 from transformers import pipeline
 from typing import List, Dict, Tuple, Any
 import json
+import pandas as pd
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -352,6 +353,51 @@ class DocumentProcessor:
             logger.error(f"Error processing PDF {pdf_file_name}: {e}")
             return False
 
+    def process_excel(self, excel_file_name: str) -> bool:
+        try:
+            # Get Excel from MinIO
+            response = self.minio_client.get_object(
+                st.secrets["R2_BUCKET_NAME"], 
+                excel_file_name
+            )
+            excel_content = response.read()
+            df = pd.read_excel(io.BytesIO(excel_content))
+
+            st.write(f"Processing: {excel_file_name}")
+
+            vectors = []
+
+            # Iterate over rows in the DataFrame
+            for index, row in df.iterrows():
+                row_text = ' '.join(map(str, row.values))
+                embedding = self.embedding_model.encode(row_text).tolist()
+                vectors.append(PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=embedding,
+                    payload={
+                        "type": "excel",
+                        "row_index": index + 1,
+                        "content": row_text,
+                        "file_name": excel_file_name
+                    }
+                ))
+
+            # Store vectors in Qdrant
+            try:
+                self.qdrant_client.upsert(
+                    collection_name="manual_vectors",
+                    points=vectors
+                )
+                st.success(f"Processed {len(vectors)} vectors from Excel file")
+                return True
+            except Exception as e:
+                logger.error(f"Error storing vectors from Excel: {e}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error processing Excel {excel_file_name}: {e}")
+            return False
+
     def _display_sample_images(self, images: List[Tuple[str, Image.Image]]):
         if not images:
             return
@@ -406,6 +452,9 @@ class RAGPipeline:
                 context += f"\nImage reference: {payload['image_name']}"
                 context += f" from {payload['file_name']}, page {payload['page']}:\n"
                 context += f"Image context: {payload['surrounding_text']}\n"
+            elif payload["type"] == "excel":
+                context += f"From {payload['file_name']}, row {payload['row_index']}:\n"
+                context += f"{payload['content']}\n"
 
         # Prepare chat messages
         messages = [
@@ -466,13 +515,14 @@ def create_streamlit_ui():
 
     if page == "Process PDFs":
         st.header("PDF Processing")
-        if st.button("Process PDFs from Storage"):
+        if st.button("Process PDFs and Excels from Storage"):
             try:
                 objects = minio_client.list_objects(st.secrets["R2_BUCKET_NAME"])
                 pdf_files = [obj.object_name for obj in objects if obj.object_name.endswith('.pdf')]
+                excel_files = [obj.object_name for obj in objects if obj.object_name.endswith('.xlsx') or obj.object_name.endswith('.xls')]
                 
-                if not pdf_files:
-                    st.warning("No PDF files found in storage.")
+                if not pdf_files and not excel_files:
+                    st.warning("No PDF or Excel files found in storage.")
                     return
                 
                 doc_processor.recreate_collection()
@@ -482,10 +532,16 @@ def create_streamlit_ui():
                         success = doc_processor.process_pdf(pdf_file)
                         if success:
                             st.session_state.processed_files.add(pdf_file)
+
+                for excel_file in excel_files:
+                    if excel_file not in st.session_state.processed_files:
+                        success = doc_processor.process_excel(excel_file)
+                        if success:
+                            st.session_state.processed_files.add(excel_file)
                 
-                st.success("All PDFs processed successfully!")
+                st.success("All PDFs and Excels processed successfully!")
             except Exception as e:
-                st.error(f"Error processing PDFs: {e}")
+                st.error(f"Error processing files: {e}")
 
     else:  # Query Documents page
         st.header("Document Query")
