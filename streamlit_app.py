@@ -301,7 +301,7 @@ class StreamlitApp:
         self.rag_pipeline = RAGPipeline(self.qdrant_client, self.embedding_model)
 
     def run(self):
-        st.title('Document Query System')
+        st.title('NaviBot - Navigating you through technical challenges')
         st.header("Ask Your Question")
         
         question = st.text_input("Enter your question:")
